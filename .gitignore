@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.wrangler/
+.serena/
+.DS_Store
+.dev.vars
