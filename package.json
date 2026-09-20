@@ -7,7 +7,8 @@
     "build": "vite build",
     "deploy": "vite build && wrangler deploy",
     "test": "node --test src/shared/*.test.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.worker.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.worker.json",
+    "e2e": "node scripts/e2e.mjs"
   },
   "dependencies": {
     "react": "^19.3.0",
