@@ -113,6 +113,19 @@ for (const path of ['/admin', `/screen/${code}`, `/play/${code}`]) {
   check(`${path} serves the SPA shell`, res.ok && (res.headers.get('content-type') ?? '').includes('text/html'), `status=${res.status}`)
 }
 
+// --- a phone must not hold both boards by joining the other team ---
+const tabA = await connect(code, { playerId: 'cheat', name: 'Cheat', team: 'red' })
+await settle()
+check('second phone joins red', tabA.latestView().team === 'red')
+const tabB = await connect(code, { playerId: 'cheat', name: 'Cheat', team: 'blue' })
+await settle()
+check('same playerId joining blue gets the blue board', tabB.latestView().team === 'blue')
+check('the abandoned red tab loses its board', tabA.latestView().viewer === 'unassigned', `viewer=${tabA.latestView().viewer}`)
+send(tabA, { t: 'tap', word: 'HEART' })
+await settle()
+check('the abandoned tab cannot act on its old team', tabA.frames.some(f => f.msg.t === 'error' && f.msg.message === 'join a team first'))
+tabA.close(); tabB.close(); await settle()
+
 // --- shared board: a tap by one teammate reaches the other ---
 const word = 'HEART'
 send(red1, { t: 'tap', word })
@@ -197,6 +210,11 @@ await post(`/api/rooms/${code}/end`, {}, token); await settle()
 check('phase done after admin end', red1.latestView().phase === 'done')
 check('solution revealed on done', red1.latestView().solution?.length === 4)
 check('result computed on done', red1.latestView().result?.winner !== undefined, JSON.stringify(red1.latestView().result))
+
+// --- changing the puzzle starts a different game, not a half-scored one ---
+await post(`/api/rooms/${code}/puzzle`, { puzzleId: 'acts4-need' }, token); await settle()
+check('changing the puzzle clears progress scored against the old one', red1.latestView().you.solved.length === 0 && red1.latestView().you.mistakes === 0)
+check('changing the puzzle keeps the roster', Object.keys(red1.latestView().you.players).length === 2)
 
 for (const ws of [red1, red2, blue1, sneak, screen, admin]) ws.close()
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`)

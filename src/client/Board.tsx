@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useRoom } from './useRoom.ts'
-import { DIFFICULTY_COLORS, GROUP_SIZE, MAX_MISTAKES } from '../shared/game.ts'
+import { DIFFICULTY_COLORS, GROUP_COUNT, GROUP_SIZE, MAX_MISTAKES } from '../shared/game.ts'
 import type { Group, TeamId } from '../shared/types.ts'
 
 export function formatElapsed(ms: number): string {
@@ -66,6 +66,9 @@ export function Board({ code, name, team }: { code: string; name: string; team: 
       <main className="wrap">
         <h1>Room {code}</h1>
         <p className={`status ${status}`} aria-live="polite">{status}...</p>
+        {status === 'reconnecting' && (
+          <p className="hint">Can't reach room {code}. Check the code with your leader.</p>
+        )}
       </main>
     )
   }
@@ -83,7 +86,8 @@ export function Board({ code, name, team }: { code: string; name: string; team: 
 
   const you = view.you
   const selected = Object.keys(you.selection).filter(word => you.selection[word].length > 0)
-  const playing = view.phase === 'playing'
+  const teamOut = you.solved.length >= GROUP_COUNT || you.mistakes >= MAX_MISTAKES
+  const playing = view.phase === 'playing' && !teamOut
   const needsMoreConfirms = selected.length === GROUP_SIZE && you.confirms.length < view.confirmsRequired
 
   return (
@@ -99,6 +103,14 @@ export function Board({ code, name, team }: { code: string; name: string; team: 
       <p className={`status ${status}`} aria-live="polite">
         {status === 'open' ? `${team} team - ${Object.keys(you.players).length} here` : `${status}...`}
       </p>
+
+      {view.phase === 'playing' && teamOut && (
+        <p className="hint" aria-live="polite">
+          {you.solved.length >= GROUP_COUNT
+            ? 'Your team is finished. Waiting for the other team.'
+            : 'Your team is out of mistakes. Waiting for the other team.'}
+        </p>
+      )}
 
       {view.phase === 'done' && view.result && (
         <div className="winner">

@@ -129,6 +129,12 @@ export class RoomDO extends DurableObject {
     this.room.puzzleId = puzzleId;
     this.room.order = buildOrder(puzzle, this.room.code);
     this.teamOrder = { red: [...this.room.order], blue: [...this.room.order] };
+    // Progress is scored against a specific puzzle: solved group ids from the
+    // old one are meaningless here and would still count toward isTeamDone.
+    // Changing the puzzle is starting a different game - keep only the roster.
+    for (const team of ["red", "blue"] as const) {
+      this.room.teams[team] = { ...emptyTeamState(), players: this.room.teams[team].players };
+    }
     await this.persist();
     await this.broadcastState();
     return ok();
@@ -203,6 +209,13 @@ export class RoomDO extends DurableObject {
     server.serializeAttachment(attachment);
 
     if (role === "player" && team) {
+      // A phone can open a second tab and ask to join the other team, which
+      // would hand it the board it is racing against. A playerId is on
+      // exactly one team at a time: joining one leaves the other, and every
+      // view follows current membership rather than what a socket asked for
+      // (see currentTeam), so the abandoned socket loses its board.
+      const other: TeamId = team === "red" ? "blue" : "red";
+      delete this.room.teams[other].players[playerId];
       const existing = this.room.teams[team].players[playerId];
       // Reconnecting playerId UPDATES the existing entry - Record<PlayerId,
       // ...> is keyed by playerId, so this can never duplicate a player.
@@ -237,7 +250,7 @@ export class RoomDO extends DurableObject {
       this.safeSend(ws, { t: "error", message: "spectators cannot act" });
       return;
     }
-    const team = attachment.team;
+    const team = this.currentTeam(attachment);
     if (!team) {
       this.safeSend(ws, { t: "error", message: "join a team first" });
       return;
@@ -416,10 +429,19 @@ export class RoomDO extends DurableObject {
     return (ws.deserializeAttachment() as SocketAttachment | null) ?? null;
   }
 
+  // The attachment records the team this socket ASKED for at accept time.
+  // Membership can move afterwards, so every send path resolves the team
+  // through the live roster instead of trusting the socket's original claim.
+  private currentTeam(attachment: SocketAttachment): TeamId | null {
+    const team = attachment.team;
+    if (attachment.role !== "player" || team === null) return null;
+    return this.room?.teams[team].players[attachment.playerId] ? team : null;
+  }
+
   private viewerFor(attachment: SocketAttachment): Viewer {
     return attachment.role !== "player" && attachment.authenticated
       ? { kind: "spectator" }
-      : { kind: "player", team: attachment.team };
+      : { kind: "player", team: this.currentTeam(attachment) };
   }
 
   // Builds one viewer's RoomView. `Room.order` is the single shared field on
@@ -465,7 +487,7 @@ export class RoomDO extends DurableObject {
   private sendToTeam(team: TeamId, msg: ServerMsg): void {
     for (const ws of this.ctx.getWebSockets()) {
       const attachment = this.readAttachment(ws);
-      if (attachment && attachment.role === "player" && attachment.team === team) this.safeSend(ws, msg);
+      if (attachment && this.currentTeam(attachment) === team) this.safeSend(ws, msg);
     }
   }
 
@@ -473,7 +495,7 @@ export class RoomDO extends DurableObject {
     for (const ws of this.ctx.getWebSockets()) {
       const attachment = this.readAttachment(ws);
       if (!attachment) continue;
-      if (attachment.role === "player" && attachment.team === team) continue;
+      if (this.currentTeam(attachment) === team) continue;
       this.safeSend(ws, msg);
     }
   }

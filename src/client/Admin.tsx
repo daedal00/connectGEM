@@ -146,7 +146,10 @@ function AdminRoom({
         <select
           value={view.puzzleId ?? ''}
           disabled={busy || phase === 'playing'}
-          onChange={e => run(() => api.setPuzzle(token, code, e.target.value))}
+          onChange={e => {
+            const puzzleId = e.target.value
+            run(() => api.setPuzzle(token, code, puzzleId))
+          }}
         >
           <option value="" disabled>Pick a puzzle</option>
           {puzzles.map(puzzle => (
