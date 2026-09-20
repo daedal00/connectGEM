@@ -1,0 +1,182 @@
+/* NYT Connections look: deliberately plain. Mechanics are reimplemented here;
+   no NYT wordmark, logo, or puzzle content is reproduced. */
+
+:root {
+  --tile: #efefe6;
+  --tile-selected: #5a594e;
+  --page: #fff;
+  --ink: #121212;
+  --muted: #7f7f7f;
+  --line: #d9d9d3;
+  --red: #c8553d;
+  --blue: #3d6cc8;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font-family: 'Libre Franklin', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+.wrap {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 16px 12px 48px;
+}
+
+h1 { font-size: 1.35rem; letter-spacing: -0.01em; margin: 0 0 2px; }
+.scripture { color: var(--muted); font-size: 0.8rem; margin: 0 0 16px; }
+
+/* --- status --- */
+.status { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; padding: 6px 0; }
+.status.open { color: var(--muted); }
+.status.connecting, .status.reconnecting { color: #b45309; font-weight: 700; }
+
+.topbar { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.clock { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.85rem; }
+
+/* --- solved bands --- */
+.band {
+  border-radius: 6px;
+  padding: 10px 8px;
+  margin-bottom: 8px;
+  text-align: center;
+  color: #121212;
+}
+.band-name { font-weight: 800; text-transform: uppercase; font-size: 0.8rem; letter-spacing: 0.02em; }
+.band-words { font-size: 0.8rem; margin-top: 2px; }
+
+/* --- grid --- */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.tile {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  border: none;
+  border-radius: 6px;
+  background: var(--tile);
+  color: var(--ink);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.01em;
+  font-size: clamp(0.6rem, 3.4vw, 1rem);
+  line-height: 1.05;
+  padding: 2px;
+  cursor: pointer;
+  word-break: break-word;
+  font-family: inherit;
+}
+.tile.long { font-size: clamp(0.45rem, 2.5vw, 0.8rem); }
+.tile:focus-visible { outline: 3px solid #3d6cc8; outline-offset: 2px; }
+
+/* Selection is never signalled by colour alone: a selected tile also inverts
+   and carries a visible ring, for colour-blind players and bright halls. */
+.tile.selected {
+  background: var(--tile-selected);
+  color: #fff;
+  box-shadow: inset 0 0 0 3px #121212;
+}
+
+/* Who on your team tapped this tile. The shared board is the whole point. */
+.tapper {
+  position: absolute;
+  left: 0; right: 0; bottom: 3px;
+  font-size: 0.5rem;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 3px;
+}
+.tile.selected .tapper { color: #e6e6e6; }
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+.grid.shake { animation: shake 0.4s; }
+@media (prefers-reduced-motion: reduce) { .grid.shake { animation: none; } }
+
+/* --- controls --- */
+.controls { display: flex; gap: 8px; margin-bottom: 14px; }
+button.action {
+  flex: 1;
+  padding: 13px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--ink);
+  background: #fff;
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 0.9rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+button.action.primary { background: var(--ink); color: #fff; }
+button.action:disabled { opacity: 0.35; cursor: not-allowed; }
+button.action:focus-visible { outline: 3px solid #3d6cc8; outline-offset: 2px; }
+
+.mistakes { display: flex; align-items: center; gap: 6px; justify-content: center; font-size: 0.8rem; margin-bottom: 12px; }
+.dot { width: 12px; height: 12px; border-radius: 50%; background: var(--tile-selected); }
+.dot.spent { background: var(--line); }
+
+.flash { text-align: center; font-weight: 700; min-height: 1.4em; margin-bottom: 8px; font-size: 0.9rem; }
+
+/* --- opponent --- */
+.opponent {
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 12px;
+  font-size: 0.85rem;
+  color: var(--muted);
+  display: flex;
+  justify-content: space-between;
+}
+
+/* --- join --- */
+.field { display: block; margin-bottom: 14px; }
+.field span { display: block; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 5px; color: var(--muted); }
+.field input {
+  width: 100%;
+  padding: 13px;
+  font-size: 1rem;
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  font-family: inherit;
+}
+.field input:focus-visible { outline: 3px solid #3d6cc8; outline-offset: 1px; }
+.code-input { text-transform: uppercase; letter-spacing: 0.3em; font-weight: 800; text-align: center; }
+
+.teams { display: flex; gap: 8px; margin-bottom: 20px; }
+.team-btn {
+  flex: 1; padding: 15px; border-radius: 6px; font-weight: 800; font-size: 0.95rem;
+  border: 2px solid var(--line); background: #fff; cursor: pointer; font-family: inherit;
+}
+.team-btn:focus-visible { outline: 3px solid #3d6cc8; outline-offset: 2px; }
+.team-btn.red.on { border-color: var(--red); background: var(--red); color: #fff; }
+.team-btn.blue.on { border-color: var(--blue); background: var(--blue); color: #fff; }
+
+.winner { text-align: center; font-size: 1.15rem; font-weight: 800; margin: 14px 0; }
+.error { color: #b91c1c; font-size: 0.85rem; text-align: center; min-height: 1.2em; }
+
+/* A tile only your teammates have tapped reads differently from one you
+   tapped yourself - on a board ten people share, "who picked this" is the
+   information that matters most. */
+.tile.selected.theirs { background: #8a8880; box-shadow: inset 0 0 0 3px #5a594e; }
+.hint { text-align: center; font-size: 0.78rem; color: var(--muted); margin: -6px 0 12px; }
+
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

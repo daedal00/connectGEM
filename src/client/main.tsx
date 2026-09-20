@@ -1,28 +1,22 @@
-import { useState } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot } from 'react-dom/client'
+import { Join, NAME_KEY, readTeam } from './Join.tsx'
+import { Board } from './Board.tsx'
+import './theme.css'
 
-const TEST_ROOM_CODE = "TEST";
-
+// Four screens, so the router is a switch on the path. Wave 3 adds /admin
+// and /screen/:code here.
 function App() {
-  const [reply, setReply] = useState("(no reply yet)");
-
-  function ping() {
-    const protocol = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${protocol}://${location.host}/api/rooms/${TEST_ROOM_CODE}/ws`);
-    ws.addEventListener("open", () => ws.send("ping"));
-    ws.addEventListener("message", (event) => setReply(String(event.data)));
-    ws.addEventListener("error", () => setReply("(websocket error)"));
+  const play = location.pathname.match(/^\/play\/([^/]+)\/?$/)
+  if (play) {
+    const code = decodeURIComponent(play[1]).toUpperCase()
+    const name = localStorage.getItem(NAME_KEY)
+    const team = readTeam()
+    if (name && team) return <Board code={code} name={name} team={team} />
+    return <Join initialCode={code} />
   }
-
-  return (
-    <>
-      <h1>Connect GEM</h1>
-      <button onClick={ping}>Ping room {TEST_ROOM_CODE}</button>
-      <p>{reply}</p>
-    </>
-  );
+  return <Join initialCode="" />
 }
 
-const container = document.getElementById("root");
-if (!container) throw new Error("missing #root element");
-createRoot(container).render(<App />);
+const container = document.getElementById('root')
+if (!container) throw new Error('missing #root element')
+createRoot(container).render(<App />)
