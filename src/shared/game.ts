@@ -4,7 +4,8 @@ import type {
   Room,
   TeamState,
   TeamId,
-  Role,
+  Viewer,
+  MatchResult,
   GuessOutcome,
   RoomView,
   RevealedGroup,
@@ -17,6 +18,10 @@ export const GROUP_COUNT = 4
 export const GROUP_SIZE = 4
 export const MAX_MISTAKES = 4
 export const DEFAULT_CONFIRMS = 2
+// Puzzle words are single short tokens. The cap is defence in depth against a
+// phone sending a megabyte string that the Durable Object would then persist
+// as a `selection` key.
+export const MAX_WORD_LENGTH = 40
 export const DIFFICULTY_COLORS = ['#F9DF6D', '#A0C35A', '#B0C4EF', '#BA81C5'] as const
 
 // --- Seeded shuffle ---
@@ -122,7 +127,22 @@ export function isRoundOver(room: Room): boolean {
   return isTeamDone(room.teams.red) && isTeamDone(room.teams.blue)
 }
 
-export function matchResult(teams: Record<TeamId, TeamState>): { winner: TeamId | 'tie'; reason: string } {
+// A tap arrives from a phone. Only a word that is actually on that team's
+// live board may be recorded - otherwise the Durable Object persists
+// attacker-chosen keys in `selection`.
+export function isLegalTap(room: Room, puzzle: Puzzle, team: TeamId, word: string): boolean {
+  if (typeof word !== 'string' || word.length === 0 || word.length > MAX_WORD_LENGTH) return false
+  if (!room.order.includes(word)) return false
+  const group = indexWords(puzzle).get(word)
+  if (!group) return false
+  return !room.teams[team].solved.some(s => s.groupId === group.id)
+}
+
+export function isValidConfirms(n: unknown): n is number {
+  return typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= GROUP_SIZE
+}
+
+export function matchResult(teams: Record<TeamId, TeamState>): MatchResult {
   const red = teams.red
   const blue = teams.blue
 
@@ -185,7 +205,7 @@ function toOpponentView(state: TeamState): OpponentView {
   }
 }
 
-export function toRoomView(room: Room, puzzle: Puzzle | null, viewer: { team: TeamId | null; role: Role }): RoomView {
+export function toRoomView(room: Room, puzzle: Puzzle | null, viewer: Viewer, serverNow: number): RoomView {
   const base = {
     code: room.code,
     phase: room.phase,
@@ -193,10 +213,12 @@ export function toRoomView(room: Room, puzzle: Puzzle | null, viewer: { team: Te
     puzzle: puzzle ? { title: puzzle.title, scripture: puzzle.scripture } : null,
     confirmsRequired: room.confirmsRequired,
     startedAt: room.startedAt,
+    serverNow,
+    result: room.phase === 'done' ? matchResult(room.teams) : null,
     solution: room.phase === 'done' && puzzle ? puzzle.groups : null,
   }
 
-  if (viewer.role === 'screen' || viewer.role === 'admin') {
+  if (viewer.kind === 'spectator') {
     return {
       ...base,
       viewer: 'spectator',
@@ -239,7 +261,9 @@ export function parseClientMsg(raw: string): ClientMsg | null {
     case 'submit':
       return keys.length === 1 ? { t: obj.t } : null
     case 'tap':
-      return keys.length === 2 && typeof obj.word === 'string' ? { t: 'tap', word: obj.word } : null
+      return keys.length === 2 && typeof obj.word === 'string' && obj.word.length > 0 && obj.word.length <= MAX_WORD_LENGTH
+        ? { t: 'tap', word: obj.word }
+        : null
     default:
       return null
   }

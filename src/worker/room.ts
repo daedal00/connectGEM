@@ -7,6 +7,15 @@ interface SocketAttachment {
   connectedAt: number;
 }
 
+// A close-frame reason is capped at 123 UTF-8 BYTES, and the reason here came
+// from the client. Trim on a byte budget, not a character count, so a
+// multi-byte name cannot overflow the frame and make ws.close() throw.
+function truncateReason(reason: string): string {
+  const bytes = new TextEncoder().encode(reason);
+  if (bytes.length <= 123) return reason;
+  return new TextDecoder().decode(bytes.slice(0, 123)).replace(/\uFFFD+$/, "");
+}
+
 // Hibernation API (ctx.acceptWebSocket, not server.accept()) lets Cloudflare
 // evict this Durable Object from memory between messages instead of billing
 // wall-clock time for every idle connection - required to stay on the free
@@ -25,7 +34,14 @@ export class RoomDO extends DurableObject {
   }
 
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
-    const attachment = ws.deserializeAttachment() as SocketAttachment;
+    // Hibernation can evict this object between messages, so the attachment is
+    // the only per-connection state that survives. Treat a missing one as a
+    // broken socket rather than casting and dereferencing null.
+    const attachment = ws.deserializeAttachment() as SocketAttachment | null;
+    if (!attachment) {
+      ws.close(1011, "missing socket attachment");
+      return;
+    }
     const text = typeof message === "string" ? message : new TextDecoder().decode(message);
     ws.send(JSON.stringify({ echo: text, connectedAt: attachment.connectedAt }));
   }
@@ -39,7 +55,7 @@ export class RoomDO extends DurableObject {
     if (code === 1005 || code === 1006) {
       ws.close();
     } else {
-      ws.close(code, reason);
+      ws.close(code, truncateReason(reason));
     }
   }
 

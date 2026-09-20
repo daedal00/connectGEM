@@ -8,8 +8,11 @@ import {
   matchResult,
   toRoomView,
   parseClientMsg,
+  isLegalTap,
+  isValidConfirms,
+  MAX_WORD_LENGTH,
 } from './game.ts'
-import type { Puzzle, Room, TeamState } from './types.ts'
+import type { Puzzle, Room, TeamState, ServerMsg } from './types.ts'
 
 const PUZZLE: Puzzle = {
   id: 'test-puzzle',
@@ -229,7 +232,7 @@ test('toRoomView (player): no unsolved group name/members leak, no opponent sele
     teams: { red, blue },
   }
 
-  const view = toRoomView(room, PUZZLE, { team: 'red', role: 'player' })
+  const view = toRoomView(room, PUZZLE, { kind: 'player', team: 'red' }, 9000)
   const json = JSON.stringify(view)
 
   assert.equal(view.viewer, 'player')
@@ -292,7 +295,7 @@ test('toRoomView: phase done reveals the full solution to a player', () => {
     teams: { red, blue },
   }
 
-  const view = toRoomView(room, PUZZLE, { team: 'red', role: 'player' })
+  const view = toRoomView(room, PUZZLE, { kind: 'player', team: 'red' }, 9000)
   assert.notEqual(view.solution, null)
   const json = JSON.stringify(view)
   assert.equal(json.includes('SOLD IT'), true)
@@ -300,7 +303,7 @@ test('toRoomView: phase done reveals the full solution to a player', () => {
   assert.equal(json.includes('___ GRACE'), true)
 })
 
-test('toRoomView (admin/screen): sees both teams in full, including unsolved names', () => {
+test('toRoomView (spectator): sees both teams boards in full, still no unsolved answers', () => {
   const red = emptyTeam()
   const blue = emptyTeam()
   const room: Room = {
@@ -312,7 +315,7 @@ test('toRoomView (admin/screen): sees both teams in full, including unsolved nam
     order: buildOrder(PUZZLE, 'ROOM1'),
     teams: { red, blue },
   }
-  const view = toRoomView(room, PUZZLE, { team: null, role: 'admin' })
+  const view = toRoomView(room, PUZZLE, { kind: 'spectator' }, 9000)
   assert.equal(view.viewer, 'spectator')
   if (view.viewer === 'spectator') {
     assert.equal(view.red.board.length, 16)
@@ -332,7 +335,7 @@ test('toRoomView (player, no team yet): no team data leaks before joining a side
     order: [],
     teams: { red, blue },
   }
-  const view = toRoomView(room, null, { team: null, role: 'player' })
+  const view = toRoomView(room, null, { kind: 'player', team: null }, 9000)
   assert.equal(view.viewer, 'unassigned')
   assert.equal('you' in view, false)
   assert.equal('opponent' in view, false)
@@ -356,4 +359,75 @@ test('parseClientMsg: rejects malformed input without throwing', () => {
   assert.equal(parseClientMsg(JSON.stringify({ t: 'nonsense' })), null)
   assert.equal(parseClientMsg(JSON.stringify({ t: 'tap', word: 5 })), null)
   assert.equal(parseClientMsg(JSON.stringify({ t: 'clear', extra: true })), null)
+})
+
+// --- R1 regression tests ---
+
+function playingRoom(red: TeamState, blue: TeamState, phase: Room['phase'] = 'playing'): Room {
+  return {
+    code: 'ROOM1',
+    phase,
+    puzzleId: PUZZLE.id,
+    confirmsRequired: 2,
+    startedAt: 1000,
+    order: buildOrder(PUZZLE, 'ROOM1'),
+    teams: { red, blue },
+  }
+}
+
+test('opponentResult broadcast carries no answer; yourResult keeps the group', () => {
+  const group = PUZZLE.groups[1]
+
+  const broadcast: ServerMsg = { t: 'opponentResult', team: 'red', outcome: { solved: true } }
+  const json = JSON.stringify(broadcast)
+  assert.equal(json.includes(group.name), false)
+  assert.equal(json.includes(group.id), false)
+  for (const word of group.members) assert.equal(json.includes(word), false)
+
+  // Control: the acting team's own message is meant to carry the answer.
+  const private_: ServerMsg = { t: 'yourResult', outcome: { kind: 'correct', group } }
+  assert.equal(JSON.stringify(private_).includes(group.name), true)
+})
+
+test('RoomView.result is null until done, then matches matchResult', () => {
+  const red = emptyTeam()
+  const blue = emptyTeam()
+  red.solved = [{ groupId: 'g0', at: 1 }]
+  blue.mistakes = 4
+
+  const playing = toRoomView(playingRoom(red, blue), PUZZLE, { kind: 'player', team: 'red' }, 9000)
+  assert.equal(playing.result, null)
+
+  const done = toRoomView(playingRoom(red, blue, 'done'), PUZZLE, { kind: 'player', team: 'red' }, 9000)
+  assert.deepEqual(done.result, matchResult({ red, blue }))
+  assert.equal(done.result?.winner, 'red')
+})
+
+test('RoomView carries the server clock rather than a client one', () => {
+  const view = toRoomView(playingRoom(emptyTeam(), emptyTeam()), PUZZLE, { kind: 'player', team: 'red' }, 424242)
+  assert.equal(view.serverNow, 424242)
+})
+
+test('isLegalTap: only words on that team live board', () => {
+  const red = emptyTeam()
+  red.solved = [{ groupId: 'g0', at: 1 }]
+  const room = playingRoom(red, emptyTeam())
+
+  assert.equal(isLegalTap(room, PUZZLE, 'red', 'SOLD'), true)
+  assert.equal(isLegalTap(room, PUZZLE, 'red', 'NOTAWORD'), false)
+  assert.equal(isLegalTap(room, PUZZLE, 'red', 'HEART'), false, 'g0 already solved by red')
+  assert.equal(isLegalTap(room, PUZZLE, 'blue', 'HEART'), true, 'blue has not solved g0')
+  assert.equal(isLegalTap(room, PUZZLE, 'red', 'X'.repeat(MAX_WORD_LENGTH + 1)), false)
+  assert.equal(isLegalTap(room, PUZZLE, 'red', ''), false)
+})
+
+test('parseClientMsg rejects an over-long tap word', () => {
+  assert.equal(parseClientMsg(JSON.stringify({ t: 'tap', word: 'X'.repeat(MAX_WORD_LENGTH + 1) })), null)
+  assert.equal(parseClientMsg(JSON.stringify({ t: 'tap', word: '' })), null)
+  assert.notEqual(parseClientMsg(JSON.stringify({ t: 'tap', word: 'X'.repeat(MAX_WORD_LENGTH) })), null)
+})
+
+test('isValidConfirms accepts 1..4 integers only', () => {
+  for (const n of [1, 2, 3, 4]) assert.equal(isValidConfirms(n), true)
+  for (const n of [0, 5, -1, 2.5, '2', null, undefined, NaN]) assert.equal(isValidConfirms(n), false)
 })

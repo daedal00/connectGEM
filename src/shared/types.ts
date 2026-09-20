@@ -11,6 +11,10 @@ export type PlayerId = string
 export type Group = { id: string; name: string; difficulty: Difficulty; members: [string, string, string, string] }
 export type Puzzle = { id: string; title: string; scripture: string; groups: [Group, Group, Group, Group] }
 
+// What the admin puzzle picker renders. Deliberately omits `groups`: the
+// picker must not ship an answer key to a browser before the round starts.
+export type PuzzleSummary = { id: string; title: string; scripture: string }
+
 export type TeamState = {
   players: Record<PlayerId, { name: string; connected: boolean }>
   selection: Record<string, PlayerId[]>   // word -> teammates who have tapped it
@@ -34,12 +38,22 @@ export type Room = {   // INTERNAL Durable Object state. Never sent over the wir
 // Result of a single guess. Declared here (not game.ts) because ServerMsg
 // below references it - keeps the import direction one-way, game.ts depends
 // on types.ts and never the reverse.
+//
+// The `correct` variant carries a Group, i.e. that group's ANSWER KEY. Both
+// teams race the same puzzle, so this must only ever reach the team that
+// guessed. See ServerMsg.
 export type GuessOutcome =
   | { kind: 'correct'; group: Group }
   | { kind: 'oneAway' }
   | { kind: 'wrong' }
   | { kind: 'repeat' }
   | { kind: 'invalid'; reason: string }
+
+// The same event with every trace of the answer removed, so it is safe to
+// show the opposing team. Carries no group id, name, or word.
+export type PublicOutcome = { solved: boolean }
+
+export type MatchResult = { winner: TeamId | 'tie'; reason: string }
 
 // --- Wire view: THE SECURITY BOUNDARY ---
 // RoomView is what actually goes over the socket. It is shaped so that
@@ -68,6 +82,16 @@ export type OpponentView = {
   finishedAt: number | null
 }
 
+// Who is asking. `spectator` grants BOTH teams' boards in full, so it must
+// only ever be constructed on a code path that has already verified the admin
+// token. NEVER derive this from a WebSocket query parameter or any other
+// client-supplied value: a player would open /screen/:code on their phone and
+// read the opponent's board. `Role` is intentionally not accepted here - the
+// privileged case has to be written out deliberately.
+export type Viewer =
+  | { kind: 'player'; team: TeamId | null }
+  | { kind: 'spectator' }
+
 export type RoomView = {
   code: string
   phase: Phase
@@ -75,6 +99,8 @@ export type RoomView = {
   puzzle: { title: string; scripture: string } | null
   confirmsRequired: number
   startedAt: number | null
+  serverNow: number                               // authoritative clock: phone clocks drift and the race has a time tiebreak
+  result: MatchResult | null                      // populated only once phase === 'done'
   solution: [Group, Group, Group, Group] | null   // populated only once phase === 'done'
 } & (
   | { viewer: 'player'; team: TeamId; you: TeamFullView; opponent: OpponentView }
@@ -92,5 +118,21 @@ export type ClientMsg =
 
 export type ServerMsg =
   | { t: 'state'; room: RoomView }
-  | { t: 'result'; team: TeamId; outcome: GuessOutcome }   // transient, drives the shake/reveal animation
+  // ONLY to the sockets of the team that guessed. Carries the solved Group,
+  // which is that group's answer key. Sending this room-wide hands the
+  // opposing team a free answer - they are racing the same puzzle.
+  | { t: 'yourResult'; outcome: GuessOutcome }
+  // Safe to broadcast room-wide: no group, no words, just "they got one".
+  | { t: 'opponentResult'; team: TeamId; outcome: PublicOutcome }
   | { t: 'error'; message: string }
+
+// --- Admin HTTP API ---
+// The worker routes and the admin page are written independently, so these
+// shapes are the contract between them.
+
+export type AdminLoginRequest = { password: string }
+export type AdminLoginResponse = { token: string }
+export type PuzzleListResponse = { puzzles: PuzzleSummary[] }
+export type CreateRoomResponse = { code: string }
+export type SetPuzzleRequest = { puzzleId: string }
+export type SetConfigRequest = { confirmsRequired: number }
