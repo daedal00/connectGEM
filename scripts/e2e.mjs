@@ -87,6 +87,32 @@ check('red sees its own 16 tiles', redBoard.length === 16)
 check('player view has no opponent board field', red1.latestView().opponent.board === undefined)
 check('both teams get the identical starting order', JSON.stringify(redBoard) === JSON.stringify(blue1.latestView().you.board))
 
+// --- the leader console's own socket ---
+const admin = await connect(code, { playerId: 'admin1', name: 'Leader', role: 'admin', token })
+await settle()
+check('authenticated role=admin is a spectator', admin.latestView().viewer === 'spectator')
+check('leader sees both rosters', admin.latestView().red.players !== undefined && admin.latestView().blue.players !== undefined)
+const fakeAdmin = await connect(code, { playerId: 'fake1', name: 'Fake', role: 'admin', token: `${Date.now() + 1e6}.bm90YXJlYWxtYWM` })
+await settle()
+// Downgraded to a player, and since it asked for no team it lands on the
+// 'unassigned' view - which carries neither board.
+check(
+  'role=admin with a forged token gets no spectator view',
+  fakeAdmin.latestView().viewer === 'unassigned',
+  `viewer=${fakeAdmin.latestView().viewer}`,
+)
+check(
+  'forged-token view carries no board at all',
+  fakeAdmin.frames.every(f => f.msg.t !== 'state' || (!('red' in f.msg.room) && !('you' in f.msg.room))),
+)
+fakeAdmin.close()
+
+// --- deep links must serve the SPA shell, not 404 ---
+for (const path of ['/admin', `/screen/${code}`, `/play/${code}`]) {
+  const res = await fetch(BASE + path)
+  check(`${path} serves the SPA shell`, res.ok && (res.headers.get('content-type') ?? '').includes('text/html'), `status=${res.status}`)
+}
+
 // --- shared board: a tap by one teammate reaches the other ---
 const word = 'HEART'
 send(red1, { t: 'tap', word })
@@ -172,6 +198,6 @@ check('phase done after admin end', red1.latestView().phase === 'done')
 check('solution revealed on done', red1.latestView().solution?.length === 4)
 check('result computed on done', red1.latestView().result?.winner !== undefined, JSON.stringify(red1.latestView().result))
 
-for (const ws of [red1, red2, blue1, sneak, screen]) ws.close()
+for (const ws of [red1, red2, blue1, sneak, screen, admin]) ws.close()
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`)
 process.exit(failures === 0 ? 0 : 1)

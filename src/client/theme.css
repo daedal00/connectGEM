@@ -180,3 +180,48 @@ button.action:focus-visible { outline: 3px solid #3d6cc8; outline-offset: 2px; }
 .hint { text-align: center; font-size: 0.78rem; color: var(--muted); margin: -6px 0 12px; }
 
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* --- leader console + big screen --- */
+
+/* The room code is read off a TV across a hall, so it is the largest thing
+   on the page by a wide margin. */
+.room-code { font-size: 2.6rem; font-weight: 800; letter-spacing: 0.12em; margin: 0 0 2px; }
+
+.field select {
+  width: 100%;
+  padding: 13px;
+  font-size: 1rem;
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  background: #fff;
+  font-family: inherit;
+}
+.field select:focus-visible { outline: 3px solid #3d6cc8; outline-offset: 1px; }
+
+/* The confirms-required picker reuses .team-btn without a team colour. */
+.team-btn.on { border-color: var(--ink); background: var(--ink); color: #fff; }
+
+.boards { display: flex; gap: 14px; align-items: flex-start; }
+.column { flex: 1; min-width: 0; border-top: 4px solid var(--line); padding-top: 10px; }
+.column.red { border-top-color: var(--red); }
+.column.blue { border-top-color: var(--blue); }
+.column.won { background: #fffbe6; }
+.column-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.column-head h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 6px; }
+.column .hint { margin: 0 0 8px; text-align: left; }
+
+.roster h3 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 6px; }
+.roster ul { list-style: none; margin: 0 0 8px; padding: 0; font-size: 0.85rem; }
+.roster li { padding: 2px 0; }
+/* A player whose phone locked is still on the team - dim, not gone. */
+.roster li.away { color: var(--muted); }
+
+/* The big screen is a laptop on a TV, not a phone: let it use the width and
+   drop the tap affordances, since nothing here is interactive. */
+.wrap.screen { max-width: 1100px; padding: 24px; }
+.wrap.screen .tile { cursor: default; font-size: clamp(0.7rem, 1.6vw, 1.3rem); }
+.wrap.screen .tile.long { font-size: clamp(0.55rem, 1.1vw, 0.95rem); }
+.wrap.screen h1 { font-size: 2rem; }
+.wrap.screen .winner { font-size: 2rem; }
+.wrap.screen .band-name { font-size: 1rem; }
+.wrap.screen .band-words { font-size: 0.95rem; }

@@ -40,7 +40,13 @@ export type UseRoomResult = {
   submit: () => void
 }
 
-export function useRoom(code: string, name: string, team: TeamId): UseRoomResult {
+// A privileged role is the server's decision, never the client's: passing an
+// `auth` here only asks for it. The Worker verifies the token before the
+// socket is accepted and silently downgrades an unverified socket to a
+// player, so a bad token yields a player view, not a spectator one.
+export type RoomAuth = { role: 'screen' | 'admin'; token: string }
+
+export function useRoom(code: string, name: string, team: TeamId | null, auth?: RoomAuth): UseRoomResult {
   const playerId = useRef(getOrCreatePlayerId()).current
   const [status, setStatus] = useState<ConnectionStatus>('connecting')
   const [view, setView] = useState<RoomView | null>(null)
@@ -64,7 +70,12 @@ export function useRoom(code: string, name: string, team: TeamId): UseRoomResult
       // Page's own origin, scheme picked from it - works under `vite dev` and
       // the deployed worker alike, never a hardcoded host.
       const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
-      const params = new URLSearchParams({ playerId, name, team })
+      const params = new URLSearchParams({ playerId, name })
+      if (team) params.set('team', team)
+      if (auth) {
+        params.set('role', auth.role)
+        params.set('token', auth.token)
+      }
       const ws = new WebSocket(
         `${scheme}://${location.host}/api/rooms/${encodeURIComponent(code)}/ws?${params.toString()}`,
       )
@@ -140,7 +151,7 @@ export function useRoom(code: string, name: string, team: TeamId): UseRoomResult
       socketRef.current?.close()
       socketRef.current = null
     }
-  }, [code, name, team, playerId])
+  }, [code, name, team, playerId, auth?.role, auth?.token])
 
   const send = useCallback((msg: ClientMsg) => {
     const ws = socketRef.current

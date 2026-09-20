@@ -3,12 +3,28 @@ import { useRoom } from './useRoom.ts'
 import { DIFFICULTY_COLORS, GROUP_SIZE, MAX_MISTAKES } from '../shared/game.ts'
 import type { Group, TeamId } from '../shared/types.ts'
 
-function formatElapsed(ms: number): string {
+export function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000))
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
 }
 
-function Band({ group }: { group: Group }) {
+// The race is scored on server time, so a phone with a skewed clock must not
+// show a different elapsed time from the one it is being judged on. Keep the
+// offset from the latest snapshot and tick locally against that.
+export function useElapsed(serverNow: number | undefined, startedAt: number | null | undefined): number {
+  const offsetRef = useRef(0)
+  const [, retick] = useState(0)
+  useEffect(() => {
+    if (serverNow !== undefined) offsetRef.current = serverNow - Date.now()
+  }, [serverNow])
+  useEffect(() => {
+    const id = setInterval(() => retick(t => t + 1), 1000)
+    return () => clearInterval(id)
+  }, [])
+  return startedAt == null ? 0 : Date.now() + offsetRef.current - startedAt
+}
+
+export function Band({ group }: { group: Group }) {
   return (
     <div className="band" style={{ background: DIFFICULTY_COLORS[group.difficulty] }}>
       <div className="band-name">{group.name}</div>
@@ -22,18 +38,7 @@ export function Board({ code, name, team }: { code: string; name: string; team: 
   const [flash, setFlash] = useState<string | null>(null)
   const [shaking, setShaking] = useState(false)
 
-  // The race is scored on server time. Rather than trusting the phone clock,
-  // keep the offset from the last snapshot and tick locally against it.
-  const offsetRef = useRef(0)
-  const [, retick] = useState(0)
-  const serverNow = view?.serverNow
-  useEffect(() => {
-    if (serverNow !== undefined) offsetRef.current = serverNow - Date.now()
-  }, [serverNow])
-  useEffect(() => {
-    const id = setInterval(() => retick(t => t + 1), 1000)
-    return () => clearInterval(id)
-  }, [])
+  const elapsed = useElapsed(view?.serverNow, view?.startedAt)
 
   const seq = result?.seq
   useEffect(() => {
@@ -78,7 +83,6 @@ export function Board({ code, name, team }: { code: string; name: string; team: 
 
   const you = view.you
   const selected = Object.keys(you.selection).filter(word => you.selection[word].length > 0)
-  const elapsed = view.startedAt === null ? 0 : Date.now() + offsetRef.current - view.startedAt
   const playing = view.phase === 'playing'
   const needsMoreConfirms = selected.length === GROUP_SIZE && you.confirms.length < view.confirmsRequired
 
