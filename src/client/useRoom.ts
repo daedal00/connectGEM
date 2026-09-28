@@ -1,7 +1,7 @@
-// Owns the WebSocket lifecycle for a player's connection to a room.
+// Owns the WebSocket lifecycle for one connection to a room.
 // Connection concerns only - no game-rule logic and no rendering here.
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ClientMsg, GuessOutcome, PublicOutcome, RoomView, ServerMsg, TeamId } from '../shared/types.ts'
+import type { ClientMsg, GuessEvent, Role, RoomView, ServerMsg, TeamId } from '../shared/types.ts'
 
 const PLAYER_ID_KEY = 'connectgem:playerId'
 const BASE_BACKOFF_MS = 500
@@ -19,39 +19,23 @@ function getOrCreatePlayerId(): string {
 
 export type ConnectionStatus = 'connecting' | 'open' | 'reconnecting' | 'closed'
 
-// yourResult/opponentResult are transient by contract - they are never folded
-// into `view`. Each carries a monotonic `seq` so the same outcome arriving
-// twice in a row (e.g. two 'wrong' guesses) still retriggers UI feedback.
-export type ResultEvent =
-  | { seq: number; kind: 'yourResult'; outcome: GuessOutcome }
-  | { seq: number; kind: 'opponentResult'; team: TeamId; outcome: PublicOutcome }
+// Guesses and errors are transient by contract - never folded into `view`.
+// Each carries a monotonic `seq` so the same outcome twice in a row (two
+// 'wrong' guesses) still retriggers the UI.
+export type GuessNotice = GuessEvent & { seq: number }
+export type ErrorNotice = { seq: number; message: string }
 
-export type ErrorEvent = { seq: number; message: string }
+// A privileged role is the server's decision: `token` only asks for admin.
+// The Worker verifies it before the socket is accepted and silently
+// downgrades an unverified socket to a player.
+export type RoomAuth = { role: Role; name?: string; token?: string }
 
-export type UseRoomResult = {
-  playerId: string
-  status: ConnectionStatus
-  view: RoomView | null
-  error: ErrorEvent | null
-  result: ResultEvent | null
-  tap: (word: string) => void
-  clear: () => void
-  shuffle: () => void
-  submit: () => void
-}
-
-// A privileged role is the server's decision, never the client's: passing an
-// `auth` here only asks for it. The Worker verifies the token before the
-// socket is accepted and silently downgrades an unverified socket to a
-// player, so a bad token yields a player view, not a spectator one.
-export type RoomAuth = { role: 'screen' | 'admin'; token: string }
-
-export function useRoom(code: string, name: string, team: TeamId | null, auth?: RoomAuth): UseRoomResult {
+export function useRoom(code: string, { role, name = '', token }: RoomAuth) {
   const playerId = useRef(getOrCreatePlayerId()).current
   const [status, setStatus] = useState<ConnectionStatus>('connecting')
   const [view, setView] = useState<RoomView | null>(null)
-  const [error, setError] = useState<ErrorEvent | null>(null)
-  const [result, setResult] = useState<ResultEvent | null>(null)
+  const [error, setError] = useState<ErrorNotice | null>(null)
+  const [guess, setGuess] = useState<GuessNotice | null>(null)
 
   const socketRef = useRef<WebSocket | null>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -70,12 +54,8 @@ export function useRoom(code: string, name: string, team: TeamId | null, auth?: 
       // Page's own origin, scheme picked from it - works under `vite dev` and
       // the deployed worker alike, never a hardcoded host.
       const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
-      const params = new URLSearchParams({ playerId, name })
-      if (team) params.set('team', team)
-      if (auth) {
-        params.set('role', auth.role)
-        params.set('token', auth.token)
-      }
+      const params = new URLSearchParams({ playerId, name, role })
+      if (token) params.set('token', token)
       const ws = new WebSocket(
         `${scheme}://${location.host}/api/rooms/${encodeURIComponent(code)}/ws?${params.toString()}`,
       )
@@ -98,19 +78,13 @@ export function useRoom(code: string, name: string, team: TeamId | null, auth?: 
           case 'state':
             setView(msg.room)
             break
-          case 'yourResult':
+          case 'guess':
             seqRef.current += 1
-            setResult({ seq: seqRef.current, kind: 'yourResult', outcome: msg.outcome })
-            break
-          case 'opponentResult':
-            seqRef.current += 1
-            setResult({ seq: seqRef.current, kind: 'opponentResult', team: msg.team, outcome: msg.outcome })
+            setGuess({ ...msg.event, seq: seqRef.current })
             break
           case 'error':
             seqRef.current += 1
             setError({ seq: seqRef.current, message: msg.message })
-            break
-          default:
             break
         }
       })
@@ -129,9 +103,9 @@ export function useRoom(code: string, name: string, team: TeamId | null, auth?: 
       ws.addEventListener('error', () => {})
     }
 
-    // A locked phone is the normal case, not an edge case: force a fresh
-    // attempt the moment the tab is foregrounded again, instead of waiting
-    // out whatever backoff delay happened to be pending.
+    // A locked phone (or a laptop that slept) is the normal case: force a
+    // fresh attempt the moment the tab is foregrounded again, instead of
+    // waiting out whatever backoff delay happened to be pending.
     const handleVisibility = () => {
       if (document.visibilityState !== 'visible') return
       const ws = socketRef.current
@@ -151,17 +125,22 @@ export function useRoom(code: string, name: string, team: TeamId | null, auth?: 
       socketRef.current?.close()
       socketRef.current = null
     }
-  }, [code, name, team, playerId, auth?.role, auth?.token])
+  }, [code, name, role, token, playerId])
 
   const send = useCallback((msg: ClientMsg) => {
     const ws = socketRef.current
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
   }, [])
 
-  const tap = useCallback((word: string) => send({ t: 'tap', word }), [send])
-  const clear = useCallback(() => send({ t: 'clear' }), [send])
-  const shuffle = useCallback(() => send({ t: 'shuffle' }), [send])
-  const submit = useCallback(() => send({ t: 'submit' }), [send])
+  const actions = {
+    join: useCallback((team: TeamId) => send({ t: 'join', team }), [send]),
+    tap: useCallback((word: string) => send({ t: 'tap', word }), [send]),
+    clear: useCallback(() => send({ t: 'clear' }), [send]),
+    shuffle: useCallback(() => send({ t: 'shuffle' }), [send]),
+    submit: useCallback(() => send({ t: 'submit' }), [send]),
+  }
 
-  return { playerId, status, view, error, result, tap, clear, shuffle, submit }
+  return { playerId, status, view, error, guess, ...actions }
 }
+
+export type RoomHandle = ReturnType<typeof useRoom>

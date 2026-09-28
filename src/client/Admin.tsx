@@ -1,13 +1,18 @@
+// The leader's remote control, built for a phone: runs the room, drives the
+// big screen, and can tap in a guess for whichever team is on turn.
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useRoom } from './useRoom.ts'
 import * as api from './adminApi.ts'
-import { GROUP_SIZE, MAX_MISTAKES } from '../shared/game.ts'
-import type { PuzzleSummary, TeamId } from '../shared/types.ts'
+import { Band, teamLabel } from './Board.tsx'
+import { CodeForm } from './Join.tsx'
+import { PlayControls, Scores } from './Play.tsx'
+import { MAX_LIVES, MAX_TEAMS, MIN_LIVES, MIN_TEAMS } from '../shared/game.ts'
+import type { PuzzleSummary } from '../shared/types.ts'
 
 const ROOM_KEY = 'connectgem:adminRoom'
 
-export function Login({ heading, onToken }: { heading: string; onToken: (token: string) => void }) {
+function Login({ onToken }: { onToken: (token: string) => void }) {
   const [password, setPassword] = useState('')
   const [problem, setProblem] = useState('')
   const [busy, setBusy] = useState(false)
@@ -27,7 +32,7 @@ export function Login({ heading, onToken }: { heading: string; onToken: (token: 
 
   return (
     <main className="wrap">
-      <h1>{heading}</h1>
+      <h1>Leader</h1>
       <form onSubmit={go}>
         <label className="field">
           <span>Leader password</span>
@@ -47,23 +52,31 @@ export function Login({ heading, onToken }: { heading: string; onToken: (token: 
   )
 }
 
-function Roster({ team, players }: { team: TeamId; players: Record<string, { name: string; connected: boolean }> }) {
-  const entries = Object.entries(players)
+function Stepper({ label, value, min, max, disabled, onPick }: {
+  label: string
+  value: number
+  min: number
+  max: number
+  disabled: boolean
+  onPick: (n: number) => void
+}) {
   return (
-    <div className={`roster ${team}`}>
-      <h3>{team} team ({entries.filter(([, p]) => p.connected).length} here)</h3>
-      {entries.length === 0 ? (
-        <p className="hint">Nobody yet.</p>
-      ) : (
-        <ul>
-          {entries.map(([id, player]) => (
-            <li key={id} className={player.connected ? '' : 'away'}>
-              {player.name}
-              {!player.connected && <span className="hint"> away</span>}
-            </li>
-          ))}
-        </ul>
-      )}
+    <div className="field">
+      <span>{label}</span>
+      <div className="stepper">
+        {Array.from({ length: max - min + 1 }, (_, i) => min + i).map(n => (
+          <button
+            key={n}
+            type="button"
+            className={`step${value === n ? ' on' : ''}`}
+            aria-pressed={value === n}
+            disabled={disabled}
+            onClick={() => onPick(n)}
+          >
+            {n}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
@@ -81,13 +94,14 @@ function AdminRoom({
   onExpired: () => void
   onLeave: () => void
 }) {
-  const { status, view } = useRoom(code, 'Leader', null, { role: 'admin', token })
+  const room = useRoom(code, { role: 'admin', name: 'Leader', token })
+  const { status, view } = room
   const [problem, setProblem] = useState('')
   const [busy, setBusy] = useState(false)
+  const [showKey, setShowKey] = useState(false)
 
   // Every admin call funnels through here so an expired token drops back to
-  // the login form from one place instead of each button growing its own
-  // copy of the same catch.
+  // the login form from one place.
   const run = useCallback(
     async (work: () => Promise<unknown>) => {
       setBusy(true)
@@ -104,21 +118,21 @@ function AdminRoom({
     [onExpired],
   )
 
-  // The admin socket is a verified spectator. Anything else means the token
-  // was rejected at the upgrade, so say so rather than render a blank console.
   if (!view) {
     return (
       <main className="wrap">
-        <h1>Room {code}</h1>
+        <h1 className="room-code">{code}</h1>
         <p className={`status ${status}`} aria-live="polite">{status}...</p>
+        {status === 'reconnecting' && <p className="hint">Room {code} may have expired. Start a new one.</p>}
         <button className="action" onClick={onLeave}>Back</button>
       </main>
     )
   }
-  if (view.viewer !== 'spectator') {
+  // A non-admin view means the token was rejected at the upgrade.
+  if (view.viewer !== 'admin') {
     return (
       <main className="wrap">
-        <h1>Room {code}</h1>
+        <h1 className="room-code">{code}</h1>
         <p className="error">This room did not accept the leader session. Log in again.</p>
         <button className="action" onClick={onExpired}>Log in</button>
       </main>
@@ -126,116 +140,180 @@ function AdminRoom({
   }
 
   const phase = view.phase
-  return (
-    <main className="wrap">
-      <div className="topbar">
-        <div>
-          <h1 className="room-code">{code}</h1>
-          <p className="scripture">{view.puzzle ? `${view.puzzle.title} - ${view.puzzle.scripture}` : 'No puzzle yet'}</p>
-        </div>
-        <span className={`status ${status}`} aria-live="polite">{phase}</span>
-      </div>
+  const playing = phase === 'playing'
+  const currentIndex = puzzles.findIndex(p => p.id === view.puzzle?.id)
+  const nextPuzzle = puzzles[(currentIndex + 1) % Math.max(puzzles.length, 1)]
+  const warmups = puzzles.filter(p => p.kind === 'warmup')
+  const scripture = puzzles.filter(p => p.kind === 'scripture')
+  const solvedIds = new Set(view.solved.map(g => g.id))
 
-      <p className="hint">
-        Players join at <strong>{location.origin}/play/{code}</strong> - big screen at{' '}
-        <a href={`/screen/${code}`} target="_blank" rel="noreferrer">/screen/{code}</a>
+  return (
+    <main className="wrap admin">
+      <div className="topbar">
+        <h1 className="room-code">{code}</h1>
+        <span className={`status ${status}`} aria-live="polite">{status === 'open' ? phase : status}</span>
+      </div>
+      <p className="hint left">
+        Big screen: <strong>{location.host}/screen/{code}</strong>
+        <br />
+        Captains: <strong>{location.host}/play</strong>, code {code}
       </p>
 
-      <label className="field">
-        <span>Puzzle</span>
-        <select
-          value={view.puzzleId ?? ''}
-          disabled={busy || phase === 'playing'}
-          onChange={e => {
-            const puzzleId = e.target.value
-            run(() => api.setPuzzle(token, code, puzzleId))
-          }}
-        >
-          <option value="" disabled>Pick a puzzle</option>
-          {puzzles.map(puzzle => (
-            <option key={puzzle.id} value={puzzle.id}>{puzzle.title} ({puzzle.scripture})</option>
-          ))}
-        </select>
-      </label>
-
-      <div className="field">
-        <span>Teammates needed to submit</span>
-        <div className="teams">
-          {Array.from({ length: GROUP_SIZE }, (_, i) => i + 1).map(n => (
-            <button
-              key={n}
-              type="button"
-              className={`team-btn${view.confirmsRequired === n ? ' on' : ''}`}
-              aria-pressed={view.confirmsRequired === n}
-              disabled={busy}
-              onClick={() => run(() => api.setConfirmsRequired(token, code, n))}
-            >
-              {n}
+      {playing && (
+        <section className="panel">
+          <div className={`turn-strip ${view.turn ?? ''} mine`}>
+            {view.turn ? `${teamLabel(view.turn)}'S TURN - you can tap for them` : ''}
+          </div>
+          <PlayControls room={room} view={view} enabled />
+          <div className="controls">
+            <button className="action" disabled={busy} onClick={() => run(() => api.roomAction(token, code, 'skip'))}>
+              Skip turn
             </button>
+            <button
+              className="action"
+              disabled={busy}
+              onClick={() => {
+                if (confirm('End the round now? Unsolved groups are revealed.')) run(() => api.roomAction(token, code, 'end'))
+              }}
+            >
+              End round
+            </button>
+          </div>
+        </section>
+      )}
+
+      {phase === 'done' && view.result && (
+        <section className="panel">
+          <div className="winner">
+            {view.result.winner === 'tie' ? "It's a tie" : `${teamLabel(view.result.winner)} wins`}
+            <div className="hint">{view.result.reason}</div>
+          </div>
+          {view.solved.map(group => <Band key={group.id} group={group} />)}
+          {view.leftover.map(group => <Band key={group.id} group={group} missed />)}
+        </section>
+      )}
+
+      <Scores view={view} />
+      <ul className="roster">
+        {view.teams.map(team => (
+          <li key={team.id}>
+            <strong className={`team-text ${team.id}`}>{teamLabel(team.id)}</strong>{' '}
+            {team.players.length === 0
+              ? <span className="hint">no captain - you can tap for them</span>
+              : team.players.map((p, i) => (
+                  <span key={i} className={p.connected ? '' : 'away'}>{i > 0 ? ', ' : ''}{p.name}{p.connected ? '' : ' (away)'}</span>
+                ))}
+            {view.round > 0 && <span className="hint"> · night total {team.total + (phase === 'done' ? team.points : 0)}</span>}
+          </li>
+        ))}
+      </ul>
+
+      {!playing && (
+        <section className="panel">
+          <h2>Next round</h2>
+          <label className="field">
+            <span>Puzzle</span>
+            <select
+              value={view.puzzle?.id ?? ''}
+              disabled={busy}
+              onChange={e => {
+                const puzzleId = e.target.value
+                run(() => api.setPuzzle(token, code, puzzleId))
+              }}
+            >
+              <option value="" disabled>Pick a puzzle</option>
+              <optgroup label="Warm-up (start here)">
+                {warmups.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+              </optgroup>
+              <optgroup label="Acts 4">
+                {scripture.map(p => <option key={p.id} value={p.id}>{p.title} ({p.scripture})</option>)}
+              </optgroup>
+            </select>
+          </label>
+          {nextPuzzle && (
+            <button
+              className="action wide"
+              disabled={busy}
+              onClick={() => run(() => api.setPuzzle(token, code, nextPuzzle.id))}
+            >
+              {view.puzzle ? 'Next puzzle' : 'First puzzle'}: {nextPuzzle.title}
+            </button>
+          )}
+
+          {phase === 'done' && <p className="hint left">Pick the next puzzle to change teams or lives.</p>}
+          <Stepper
+            label="Teams"
+            value={view.teams.length}
+            min={MIN_TEAMS}
+            max={MAX_TEAMS}
+            disabled={busy || phase !== 'lobby'}
+            onPick={n => run(() => api.setConfig(token, code, { teamCount: n }))}
+          />
+          <Stepper
+            label="Lives per team"
+            value={view.lives}
+            min={MIN_LIVES}
+            max={MAX_LIVES}
+            disabled={busy || phase !== 'lobby'}
+            onPick={n => run(() => api.setConfig(token, code, { lives: n }))}
+          />
+
+          <button
+            className="action primary wide"
+            disabled={busy || !view.puzzle}
+            onClick={() => run(() => api.roomAction(token, code, 'start'))}
+          >
+            {view.puzzle ? `Start "${view.puzzle.title}"` : 'Pick a puzzle first'}
+          </button>
+        </section>
+      )}
+
+      <p className="error" aria-live="assertive">{problem}</p>
+
+      {view.answerKey && phase !== 'done' && (
+        <section className="panel">
+          <button className="action wide" onClick={() => setShowKey(s => !s)}>
+            {showKey ? 'Hide answers' : 'Show answers (keep your phone off the projector)'}
+          </button>
+          {showKey && view.answerKey.map(group => (
+            <div key={group.id} className={solvedIds.has(group.id) ? 'key-row solved' : 'key-row'}>
+              <Band group={group} />
+            </div>
           ))}
-        </div>
-      </div>
+        </section>
+      )}
 
       <div className="controls">
         <button
-          className="action primary"
-          disabled={busy || phase !== 'lobby' || !view.puzzleId}
-          onClick={() => run(() => api.roomAction(token, code, 'start'))}
-        >
-          Start round
-        </button>
-        <button
           className="action"
-          disabled={busy || phase !== 'playing'}
-          onClick={() => run(() => api.roomAction(token, code, 'end'))}
+          disabled={busy || !view.puzzle}
+          onClick={() => {
+            // Wipes the round in progress. Cheap to redo, expensive to do by
+            // accident with twenty teenagers watching.
+            if (confirm('Reset this round? The board goes back to the start.')) run(() => api.roomAction(token, code, 'reset'))
+          }}
         >
-          End round
+          Reset round
         </button>
         <button
           className="action"
           disabled={busy}
           onClick={() => {
-            // Wipes both teams' progress. Cheap to redo, expensive to do by
-            // accident mid-round with twenty teenagers watching.
-            if (confirm(`Reset room ${code}? Both teams lose all progress.`)) {
-              run(() => api.roomAction(token, code, 'reset'))
-            }
+            if (confirm('Zero every team\'s night total?')) run(() => api.roomAction(token, code, 'zero'))
           }}
         >
-          Reset
+          Zero totals
         </button>
       </div>
-
-      <p className="error" aria-live="assertive">{problem}</p>
-
-      {phase === 'done' && view.result && (
-        <div className="winner">
-          {view.result.winner === 'tie' ? 'Tie' : `${view.result.winner} team wins`} - {view.result.reason}
-        </div>
-      )}
-
-      <div className="boards">
-        {(['red', 'blue'] as const).map(team => (
-          <div key={team} className="column">
-            <Roster team={team} players={view[team].players} />
-            <p className="hint">
-              {view[team].solved.length}/{GROUP_SIZE} solved,{' '}
-              {MAX_MISTAKES - view[team].mistakes} mistakes left
-            </p>
-          </div>
-        ))}
-      </div>
-
-      <button className="action" onClick={onLeave}>Manage a different room</button>
+      <button className="action wide" onClick={onLeave}>Switch room</button>
     </main>
   )
 }
 
 export function Admin() {
   const [token, setToken] = useState<string | null>(api.readToken)
-  const [code, setCode] = useState<string | null>(() => sessionStorage.getItem(ROOM_KEY))
+  const [code, setCode] = useState<string | null>(() => localStorage.getItem(ROOM_KEY))
   const [puzzles, setPuzzles] = useState<PuzzleSummary[]>([])
-  const [typedCode, setTypedCode] = useState('')
   const [problem, setProblem] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -259,11 +337,11 @@ export function Admin() {
   }, [token, forgetToken])
 
   const open = useCallback((next: string) => {
-    sessionStorage.setItem(ROOM_KEY, next)
+    localStorage.setItem(ROOM_KEY, next)
     setCode(next)
   }, [])
 
-  if (!token) return <Login heading="Leader" onToken={setToken} />
+  if (!token) return <Login onToken={setToken} />
 
   if (code) {
     return (
@@ -273,7 +351,7 @@ export function Admin() {
         puzzles={puzzles}
         onExpired={forgetToken}
         onLeave={() => {
-          sessionStorage.removeItem(ROOM_KEY)
+          localStorage.removeItem(ROOM_KEY)
           setCode(null)
         }}
       />
@@ -297,33 +375,13 @@ export function Admin() {
   return (
     <main className="wrap">
       <h1>Leader</h1>
-      <button className="action primary" onClick={makeRoom} disabled={busy}>
+      <button className="action primary wide" onClick={makeRoom} disabled={busy}>
         {busy ? 'Creating...' : 'New room'}
       </button>
-      <form
-        onSubmit={e => {
-          e.preventDefault()
-          const clean = typedCode.trim().toUpperCase()
-          if (clean.length === 4) open(clean)
-        }}
-      >
-        <label className="field">
-          <span>Or manage an existing room</span>
-          <input
-            className="code-input"
-            value={typedCode}
-            onChange={e => setTypedCode(e.target.value.toUpperCase())}
-            maxLength={4}
-            autoCapitalize="characters"
-            autoCorrect="off"
-            spellCheck={false}
-            placeholder="ABCD"
-          />
-        </label>
-        <button type="submit" className="action" disabled={typedCode.trim().length !== 4}>Open</button>
-      </form>
+      <p className="hint">Or pick up a room you already made:</p>
+      <CodeForm label="Open room" onCode={open} />
       <p className="error" aria-live="assertive">{problem}</p>
-      <button className="action" onClick={forgetToken}>Log out</button>
+      <button className="action wide" onClick={forgetToken}>Log out</button>
     </main>
   )
 }

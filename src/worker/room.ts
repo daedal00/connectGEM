@@ -1,31 +1,30 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Room, TeamId, TeamState, Role, Viewer, RoomView, ServerMsg } from "../shared/types.ts";
+import type { Room, Role, TeamId, Viewer, ServerMsg, GuessEvent } from "../shared/types.ts";
 import {
-  buildOrder,
+  newRoom,
+  resetRound,
+  startRound,
+  finishRound,
+  skipTurn,
+  toggleTap,
+  applyGuess,
   seededShuffle,
-  evaluateGuess,
-  isTeamDone,
-  isRoundOver,
-  isLegalTap,
-  isValidConfirms,
+  activeTeams,
+  isValidTeamCount,
+  isValidLives,
   toRoomView,
-  GROUP_SIZE,
   parseClientMsg,
-  DEFAULT_CONFIRMS,
 } from "../shared/game.ts";
 import { PUZZLES } from "../puzzles.ts";
 
 // Shape written to each socket at accept time and read back in every handler.
-// `playerId`/`name`/`team`/`role`/`authenticated` are resolved and verified by
-// the Worker (index.ts) BEFORE the socket is ever accepted here - this object
-// is never re-derived from a later client message, so a socket can't
-// re-assert a different identity mid-session.
+// `role` is resolved and verified by the Worker (index.ts) BEFORE the socket
+// is accepted here - it is never re-derived from a later client message.
+// Team membership is NOT here: it lives in `room.players`, so it survives
+// reconnects and every send path reads the current value.
 interface SocketAttachment {
   playerId: string;
-  name: string;
-  team: TeamId | null;
   role: Role;
-  authenticated: boolean;
 }
 
 // Result shape shared by every admin RPC method below, mapped 1:1 onto an
@@ -40,10 +39,6 @@ function findPuzzle(puzzleId: string | null) {
   return puzzleId ? (PUZZLES.find(p => p.id === puzzleId) ?? null) : null;
 }
 
-function emptyTeamState(): TeamState {
-  return { players: {}, selection: {}, confirms: [], solved: [], mistakes: 0, pastGuesses: [], finishedAt: null };
-}
-
 // A close-frame reason is capped at 123 UTF-8 BYTES, and the reason here came
 // from the client. Trim on a byte budget, not a character count, so a
 // multi-byte name cannot overflow the frame and make ws.close() throw.
@@ -56,68 +51,40 @@ function truncateReason(reason: string): string {
 // Hibernation API (ctx.acceptWebSocket, not server.accept()) lets Cloudflare
 // evict this Durable Object from memory between messages instead of billing
 // wall-clock time for every idle connection - required to stay on the free
-// plan for a room that sits open between rounds. The cost is that eviction
-// wipes ordinary instance fields, so any per-connection identity has to be
-// persisted on the socket itself via serializeAttachment and re-read with
-// deserializeAttachment in every handler, rather than kept in a class field.
-//
-// Room state has the same problem, solved the same way: `this.room` and
-// `this.teamOrder` are an in-memory read-through cache that the constructor
-// repopulates from ctx.storage via blockConcurrencyWhile every time this
-// object is (re)constructed after an eviction. Every mutation is written
-// back to storage before any socket sees it, so eviction can never observe a
-// state the storage doesn't already have.
+// plan for a room that sits open between rounds. Eviction wipes instance
+// fields, so per-connection identity is persisted on the socket via
+// serializeAttachment, and `this.room` is a read-through cache the
+// constructor repopulates from storage. Every mutation is written back to
+// storage before any socket sees it.
 export class RoomDO extends DurableObject {
   private room: Room | null = null;
-  // Per-team TILE ORDER, deliberately NOT part of `Room` (whose single
-  // `order` field is shared, frozen wire-contract shape). See handleShuffle
-  // for why this has to live outside `Room.order`.
-  private teamOrder: Record<TeamId, string[]> = { red: [], blue: [] };
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
-      const [room, teamOrder] = await Promise.all([
-        ctx.storage.get<Room>("room"),
-        ctx.storage.get<Record<TeamId, string[]>>("teamOrder"),
-      ]);
-      this.room = room ?? null;
-      this.teamOrder = teamOrder ?? { red: [], blue: [] };
+      const stored = await ctx.storage.get<Room>("room");
+      // Rooms created before the turn-based redesign have a different shape;
+      // treat them as gone rather than crash every handler on them.
+      this.room = stored && "teamCount" in stored ? stored : null;
     });
   }
 
-  private async persist(): Promise<void> {
+  // Persist, then show everyone. Every state change ends here.
+  private async commit(): Promise<void> {
     if (!this.room) return;
-    // Single multi-key put so room + teamOrder land in one atomic write -
-    // never await between the two, or an eviction mid-write could persist
-    // one without the other.
-    await this.ctx.storage.put<Room | Record<TeamId, string[]>>({
-      room: this.room,
-      teamOrder: this.teamOrder,
-    });
+    await this.ctx.storage.put("room", this.room);
+    this.broadcastState();
   }
 
   // --- Admin RPC methods (invoked directly by index.ts via the stub) ---
-  // Compatibility date is well past 2024-04-03, so plain public methods on a
-  // DurableObject subclass are callable as RPC - no need to hand-roll an
-  // internal fetch() sub-protocol for these.
 
   async createRoom(code: string): Promise<boolean> {
     // idFromName(code) is deterministic: the same code always maps to this
     // same DO. A collision on room-code generation must never clobber a
     // room that already exists here.
     if (this.room) return false;
-    this.room = {
-      code,
-      phase: "lobby",
-      puzzleId: null,
-      confirmsRequired: DEFAULT_CONFIRMS,
-      startedAt: null,
-      order: [],
-      teams: { red: emptyTeamState(), blue: emptyTeamState() },
-    };
-    this.teamOrder = { red: [], blue: [] };
-    await this.persist();
+    this.room = newRoom(code);
+    await this.ctx.storage.put("room", this.room);
     return true;
   }
 
@@ -125,71 +92,80 @@ export class RoomDO extends DurableObject {
     if (!this.room) return notFound("room not found");
     const puzzle = findPuzzle(puzzleId);
     if (!puzzle) return notFound("puzzle not found");
-    if (this.room.phase === "playing") return badRequest("cannot change puzzle mid-round");
-    this.room.puzzleId = puzzleId;
-    this.room.order = buildOrder(puzzle, this.room.code);
-    this.teamOrder = { red: [...this.room.order], blue: [...this.room.order] };
-    // Progress is scored against a specific puzzle: solved group ids from the
-    // old one are meaningless here and would still count toward isTeamDone.
-    // Changing the puzzle is starting a different game - keep only the roster.
-    for (const team of ["red", "blue"] as const) {
-      this.room.teams[team] = { ...emptyTeamState(), players: this.room.teams[team].players };
-    }
-    await this.persist();
-    await this.broadcastState();
+    if (this.room.phase === "playing") return badRequest("end the round before changing the puzzle");
+    resetRound(this.room, puzzle);
+    await this.commit();
     return ok();
   }
 
   async startRoom(): Promise<ActionResult> {
     if (!this.room) return notFound("room not found");
-    if (!this.room.puzzleId) return badRequest("no puzzle assigned");
-    if (this.room.phase !== "lobby") return badRequest("room is not in lobby");
-    this.room.phase = "playing";
-    this.room.startedAt = Date.now();
-    await this.persist();
-    await this.broadcastState();
+    const puzzle = findPuzzle(this.room.puzzleId);
+    if (!puzzle) return badRequest("no puzzle assigned");
+    if (this.room.phase === "playing") return badRequest("a round is already running");
+    startRound(this.room, puzzle);
+    await this.commit();
     return ok();
   }
 
   async resetRoom(): Promise<ActionResult> {
     if (!this.room) return notFound("room not found");
-    const puzzle = findPuzzle(this.room.puzzleId);
-    this.room.phase = "lobby";
-    this.room.startedAt = null;
-    this.room.order = puzzle ? buildOrder(puzzle, this.room.code) : [];
-    this.teamOrder = { red: [...this.room.order], blue: [...this.room.order] };
-    for (const team of ["red", "blue"] as const) {
-      // Keep the connected roster, wipe game progress.
-      this.room.teams[team] = { ...emptyTeamState(), players: this.room.teams[team].players };
-    }
-    await this.persist();
-    await this.broadcastState();
+    resetRound(this.room, findPuzzle(this.room.puzzleId));
+    await this.commit();
     return ok();
   }
 
   async endRoom(): Promise<ActionResult> {
     if (!this.room) return notFound("room not found");
-    this.room.phase = "done";
-    await this.persist();
-    await this.broadcastState();
+    if (this.room.phase !== "playing") return badRequest("no round is running");
+    finishRound(this.room);
+    await this.commit();
     return ok();
   }
 
-  async setConfig(confirmsRequired: number): Promise<ActionResult> {
+  async skipRoom(): Promise<ActionResult> {
     if (!this.room) return notFound("room not found");
-    if (!isValidConfirms(confirmsRequired)) return badRequest("confirmsRequired must be an integer 1..4");
-    this.room.confirmsRequired = confirmsRequired;
-    await this.persist();
-    await this.broadcastState();
+    if (this.room.phase !== "playing") return badRequest("no round is running");
+    skipTurn(this.room);
+    await this.commit();
+    return ok();
+  }
+
+  async zeroScores(): Promise<ActionResult> {
+    if (!this.room) return notFound("room not found");
+    this.room.totals = { red: 0, blue: 0, orange: 0, teal: 0 };
+    await this.commit();
+    return ok();
+  }
+
+  async setConfig(config: { teamCount?: number; lives?: number }): Promise<ActionResult> {
+    if (!this.room) return notFound("room not found");
+    // Lobby only: a finished round's winner and OUT markers are recomputed
+    // from teamCount and lives on every render, so changing them on the
+    // results screen would rewrite the result everyone just watched.
+    if (this.room.phase !== "lobby") return badRequest("pick the next puzzle before changing teams or lives");
+    if (config.teamCount !== undefined) {
+      if (!isValidTeamCount(config.teamCount)) return badRequest("teamCount must be an integer 2..4");
+      this.room.teamCount = config.teamCount;
+      // A captain on a team that no longer exists goes back to the picker
+      // rather than silently holding a team with no turns.
+      const active = activeTeams(this.room);
+      for (const player of Object.values(this.room.players)) {
+        if (player.team && !active.includes(player.team)) player.team = null;
+      }
+    }
+    if (config.lives !== undefined) {
+      if (!isValidLives(config.lives)) return badRequest("lives must be an integer 1..6");
+      this.room.lives = config.lives;
+    }
+    await this.commit();
     return ok();
   }
 
   // --- WebSocket join ---
-  // playerId/name/team/role/authenticated arrive as query params already
-  // resolved and verified by index.ts. This object trusts them because the
-  // only way to reach this fetch() is through the Worker's own ROOM binding
-  // call - never directly from the internet - so by the time a request lands
-  // here, index.ts has already done the untrusted-input validation.
+  // playerId/name/role arrive as query params already resolved and verified
+  // by index.ts. The only way to reach this fetch() is through the Worker's
+  // own ROOM binding call - never directly from the internet.
   async fetch(request: Request): Promise<Response> {
     if (!this.room) return new Response("room not found", { status: 404 });
 
@@ -197,32 +173,26 @@ export class RoomDO extends DurableObject {
     const playerId = url.searchParams.get("playerId") ?? "";
     if (!playerId) return new Response("missing playerId", { status: 400 });
     const name = url.searchParams.get("name") ?? "";
-    const rawTeam = url.searchParams.get("team");
-    const team: TeamId | null = rawTeam === "red" || rawTeam === "blue" ? rawTeam : null;
     const rawRole = url.searchParams.get("role");
-    const authenticated = url.searchParams.get("authenticated") === "1";
-    const role: Role = (rawRole === "screen" || rawRole === "admin") && authenticated ? rawRole : "player";
+    const role: Role = rawRole === "admin" || rawRole === "screen" ? rawRole : "player";
 
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server);
-    const attachment: SocketAttachment = { playerId, name, team, role, authenticated };
-    server.serializeAttachment(attachment);
+    server.serializeAttachment({ playerId, role } satisfies SocketAttachment);
 
-    if (role === "player" && team) {
-      // A phone can open a second tab and ask to join the other team, which
-      // would hand it the board it is racing against. A playerId is on
-      // exactly one team at a time: joining one leaves the other, and every
-      // view follows current membership rather than what a socket asked for
-      // (see currentTeam), so the abandoned socket loses its board.
-      const other: TeamId = team === "red" ? "blue" : "red";
-      delete this.room.teams[other].players[playerId];
-      const existing = this.room.teams[team].players[playerId];
-      // Reconnecting playerId UPDATES the existing entry - Record<PlayerId,
-      // ...> is keyed by playerId, so this can never duplicate a player.
-      this.room.teams[team].players[playerId] = { name: name || existing?.name || "Player", connected: true };
-      await this.persist();
+    if (role === "player") {
+      // Reconnecting playerId UPDATES the existing entry and keeps its team,
+      // so a phone that locks mid-round comes back as the same captain.
+      const existing = this.room.players[playerId];
+      this.room.players[playerId] = {
+        name: name || existing?.name || "Player",
+        team: existing?.team ?? null,
+        connected: true,
+      };
+      await this.commit();
+    } else {
+      this.sendState(server);
     }
-    await this.broadcastState();
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -233,7 +203,8 @@ export class RoomDO extends DurableObject {
       ws.close(1011, "missing socket attachment");
       return;
     }
-    if (!this.room) {
+    const room = this.room;
+    if (!room) {
       this.safeSend(ws, { t: "error", message: "room not found" });
       return;
     }
@@ -245,39 +216,99 @@ export class RoomDO extends DurableObject {
       return;
     }
 
-    // Spectators (verified screen/admin) are read-only observers.
-    if (attachment.role !== "player") {
-      this.safeSend(ws, { t: "error", message: "spectators cannot act" });
+    if (attachment.role === "screen") {
+      this.safeSend(ws, { t: "error", message: "the big screen is read-only" });
       return;
     }
-    const team = this.currentTeam(attachment);
-    if (!team) {
-      this.safeSend(ws, { t: "error", message: "join a team first" });
+
+    if (msg.t === "join") {
+      const player = room.players[attachment.playerId];
+      if (attachment.role !== "player" || !player) {
+        this.safeSend(ws, { t: "error", message: "only players join teams" });
+        return;
+      }
+      if (!activeTeams(room).includes(msg.team)) {
+        this.safeSend(ws, { t: "error", message: "that team is not playing" });
+        return;
+      }
+      // Mid-round, a captain could otherwise hop to whichever team is on
+      // turn and play for it. A phone with no team yet may still sign up.
+      if (room.phase === "playing" && player.team && player.team !== msg.team) {
+        this.safeSend(ws, { t: "error", message: "teams are locked until the round ends" });
+        return;
+      }
+      // One captain per team. A dead phone's stand-in may take over once the
+      // old socket has dropped; otherwise the leader plays for the team.
+      const captain = Object.entries(room.players).find(
+        ([id, p]) => id !== attachment.playerId && p.team === msg.team && p.connected,
+      );
+      if (captain) {
+        this.safeSend(ws, { t: "error", message: `${captain[1].name} is already captain of that team` });
+        return;
+      }
+      player.team = msg.team;
+      await this.commit();
+      return;
+    }
+
+    const puzzle = findPuzzle(room.puzzleId);
+    if (room.phase !== "playing" || !puzzle || !room.turn) {
+      this.safeSend(ws, { t: "error", message: "the round is not running" });
+      return;
+    }
+    // The leader's phone may play for whichever team is up (a team with no
+    // phone, or a captain whose battery died). A player acts only for their
+    // own team, and only on its turn.
+    const team: TeamId = room.turn;
+    if (attachment.role === "player" && room.players[attachment.playerId]?.team !== team) {
+      this.safeSend(ws, { t: "error", message: "not your turn" });
       return;
     }
 
     switch (msg.t) {
       case "tap":
-        await this.handleTap(team, attachment.playerId, msg.word);
+        if (toggleTap(room, puzzle, msg.word)) await this.commit();
         break;
       case "clear":
-        await this.handleClear(team);
+        room.selection = [];
+        await this.commit();
         break;
       case "shuffle":
-        await this.handleShuffle(team);
+        room.order = seededShuffle(room.order, crypto.randomUUID());
+        await this.commit();
         break;
-      case "submit":
-        await this.handleSubmit(team, attachment.playerId);
+      case "submit": {
+        const outcome = applyGuess(room, puzzle, Date.now());
+        if (outcome.kind === "invalid") {
+          this.safeSend(ws, { t: "error", message: outcome.reason });
+          return;
+        }
+        const event: GuessEvent = {
+          team,
+          outcome: outcome.kind,
+          words: room.pastGuesses.at(-1) ?? [],
+          group: null,
+        };
+        if (outcome.kind === "correct") {
+          const entry = room.solved.find(s => s.groupId === outcome.group.id);
+          event.group = { ...outcome.group, by: team, points: entry?.points ?? 0 };
+          event.words = [...outcome.group.members];
+        }
+        if (outcome.kind === "repeat") event.words = [];
+        await this.ctx.storage.put("room", room);
+        // The event first, then the state it produced, so a screen can show
+        // "ONE AWAY" over the board the guess was made on.
+        this.broadcast({ t: "guess", event });
+        this.broadcastState();
         break;
+      }
     }
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string, _wasClean: boolean): Promise<void> {
     await this.markDisconnected(ws);
-    // 1005 ("no status received") and 1006 ("abnormal closure") are receive-only
-    // pseudo-codes: the spec forbids sending them in an actual Close frame, and
-    // ws.close(1005, ...) throws InvalidAccessError. Echo the code back to
-    // complete the handshake only when it is a real, sendable code.
+    // 1005 and 1006 are receive-only pseudo-codes: ws.close(1005, ...) throws.
+    // Echo the code back only when it is a real, sendable one.
     if (code === 1005 || code === 1006) {
       ws.close();
     } else {
@@ -290,214 +321,48 @@ export class RoomDO extends DurableObject {
     await this.markDisconnected(ws);
   }
 
-  // --- Gameplay message handlers ---
-
-  private async handleTap(team: TeamId, playerId: string, word: string): Promise<void> {
-    const room = this.room;
-    if (!room) return;
-    const puzzle = findPuzzle(room.puzzleId);
-    const state = room.teams[team];
-    if (room.phase !== "playing" || !puzzle || isTeamDone(state)) return;
-    if (!isLegalTap(room, puzzle, team, word)) return;
-
-    const current = state.selection[word] ?? [];
-    const already = current.includes(playerId);
-    const selectedWordCount = Object.keys(state.selection).length;
-    if (!already && selectedWordCount >= GROUP_SIZE) return; // board full, must deselect first
-
-    const updated = already ? current.filter(id => id !== playerId) : [...current, playerId];
-    const selection = { ...state.selection };
-    if (updated.length === 0) delete selection[word];
-    else selection[word] = updated;
-
-    state.selection = selection;
-    // Any selection change clears confirms - the inclusivity mechanic: a
-    // changed guess needs everyone to re-confirm it.
-    state.confirms = [];
-    await this.persist();
-    await this.broadcastState();
-  }
-
-  private async handleClear(team: TeamId): Promise<void> {
-    const room = this.room;
-    if (!room) return;
-    const state = room.teams[team];
-    if (room.phase !== "playing" || isTeamDone(state)) return;
-    state.selection = {};
-    state.confirms = [];
-    await this.persist();
-    await this.broadcastState();
-  }
-
-  private async handleShuffle(team: TeamId): Promise<void> {
-    const room = this.room;
-    if (!room) return;
-    const state = room.teams[team];
-    if (room.phase !== "playing" || isTeamDone(state)) return;
-    const current = this.teamOrder[team];
-    if (current.length === 0) return;
-    // Fresh seed each click so seededShuffle (still the only shuffle logic
-    // in play - reused, not reimplemented) produces a new-looking order
-    // every time rather than the same deterministic permutation.
-    const seed = `${room.code}:${room.puzzleId}:${team}:${crypto.randomUUID()}`;
-    this.teamOrder = { ...this.teamOrder, [team]: seededShuffle(current, seed) };
-    await this.persist();
-    await this.broadcastState();
-  }
-
-  private async handleSubmit(team: TeamId, playerId: string): Promise<void> {
-    const room = this.room;
-    if (!room) return;
-    const puzzle = findPuzzle(room.puzzleId);
-    const state = room.teams[team];
-    if (room.phase !== "playing" || !puzzle || isTeamDone(state)) return;
-
-    // Idempotent: the same player confirming twice on an unchanged
-    // selection must not count twice.
-    if (!state.confirms.includes(playerId)) {
-      state.confirms = [...state.confirms, playerId];
-    }
-
-    if (state.confirms.length < room.confirmsRequired) {
-      await this.persist();
-      await this.broadcastState();
-      return;
-    }
-
-    const words = Object.keys(state.selection);
-    const outcome = evaluateGuess(
-      puzzle,
-      words,
-      state.solved.map(s => s.groupId),
-      state.pastGuesses,
-    );
-
-    if (outcome.kind === "correct") {
-      state.solved = [...state.solved, { groupId: outcome.group.id, at: Date.now() }];
-      state.pastGuesses = [...state.pastGuesses, words];
-    } else if (outcome.kind === "oneAway" || outcome.kind === "wrong") {
-      state.mistakes += 1;
-      state.pastGuesses = [...state.pastGuesses, words];
-    }
-    // 'repeat' costs no mistake and is already recorded. 'invalid' (a
-    // malformed selection slipping past isLegalTap, e.g. stale/replayed
-    // state) is not the team's fault and costs nothing either.
-
-    // An invalid guess is not a play: a crafted socket can submit while the
-    // selection is under-filled, and that must not destroy the team's work.
-    if (outcome.kind !== "invalid") state.selection = {};
-    state.confirms = [];
-
-    if (isTeamDone(state) && state.finishedAt === null) {
-      state.finishedAt = Date.now();
-    }
-    if (isRoundOver(room)) {
-      room.phase = "done";
-    }
-
-    await this.persist();
-
-    // yourResult carries the solved Group (the answer key) - only the team
-    // that guessed may ever see it.
-    this.sendToTeam(team, { t: "yourResult", outcome });
-    // opponentResult is the redacted signal, and only for a genuine change
-    // in that team's progress - a free repeat/invalid attempt isn't real
-    // information and would misrepresent the team's mistake count.
-    if (outcome.kind === "correct" || outcome.kind === "oneAway" || outcome.kind === "wrong") {
-      this.broadcastExceptTeam(team, { t: "opponentResult", team, outcome: { solved: outcome.kind === "correct" } });
-    }
-    await this.broadcastState();
-  }
-
   private async markDisconnected(ws: WebSocket): Promise<void> {
     const attachment = this.readAttachment(ws);
-    if (!attachment || !this.room || attachment.role !== "player" || !attachment.team) return;
-    const player = this.room.teams[attachment.team].players[attachment.playerId];
+    if (!attachment || !this.room || attachment.role !== "player") return;
+    const player = this.room.players[attachment.playerId];
     if (!player || !player.connected) return;
-    // ponytail: this flips connected:false as soon as ANY socket for this
-    // playerId closes, even if the same player has a second tab still open.
-    // Room state has no open-socket count to check against - track one per
-    // playerId if multi-tab-per-player becomes a real scenario.
-    this.room.teams[attachment.team].players[attachment.playerId] = { ...player, connected: false };
-    await this.persist();
-    await this.broadcastState();
+    // A second tab for the same player keeps them "here".
+    const stillOpen = this.ctx.getWebSockets().some(other => {
+      if (other === ws || other.readyState !== WebSocket.READY_STATE_OPEN) return false;
+      const a = this.readAttachment(other);
+      return a?.role === "player" && a.playerId === attachment.playerId;
+    });
+    if (stillOpen) return;
+    player.connected = false;
+    await this.commit();
   }
 
-  // --- Broadcast: the redaction boundary lives here as much as in game.ts ---
+  // --- Broadcast ---
 
   private readAttachment(ws: WebSocket): SocketAttachment | null {
     return (ws.deserializeAttachment() as SocketAttachment | null) ?? null;
   }
 
-  // The attachment records the team this socket ASKED for at accept time.
-  // Membership can move afterwards, so every send path resolves the team
-  // through the live roster instead of trusting the socket's original claim.
-  private currentTeam(attachment: SocketAttachment): TeamId | null {
-    const team = attachment.team;
-    if (attachment.role !== "player" || team === null) return null;
-    return this.room?.teams[team].players[attachment.playerId] ? team : null;
-  }
-
   private viewerFor(attachment: SocketAttachment): Viewer {
-    return attachment.role !== "player" && attachment.authenticated
-      ? { kind: "spectator" }
-      : { kind: "player", team: this.currentTeam(attachment) };
+    if (attachment.role === "admin") return { kind: "admin" };
+    if (attachment.role === "screen") return { kind: "screen" };
+    return { kind: "player", playerId: attachment.playerId };
   }
 
-  // Builds one viewer's RoomView. `Room.order` is the single shared field on
-  // the frozen wire-contract Room shape, but each team's live tile order is
-  // independent (see handleShuffle) - so a per-team-ordered *copy* of Room is
-  // what actually gets fed into the pure, reused toRoomView/fullTeamView.
-  // For a spectator we need both teams' own orders in the SAME RoomView, and
-  // toRoomView only takes one Room, so build each side via the 'player'
-  // branch and splice the two TeamFullViews together.
-  private buildView(viewer: Viewer, now: number): RoomView {
-    const room = this.room;
-    if (!room) throw new Error("buildView called with no room");
-    const puzzle = findPuzzle(room.puzzleId);
-
-    if (viewer.kind === "player") {
-      const order = viewer.team ? this.teamOrder[viewer.team] : room.order;
-      return toRoomView({ ...room, order }, puzzle, viewer, now);
-    }
-
-    const redView = toRoomView({ ...room, order: this.teamOrder.red }, puzzle, { kind: "player", team: "red" }, now);
-    const blueView = toRoomView({ ...room, order: this.teamOrder.blue }, puzzle, { kind: "player", team: "blue" }, now);
-    if (redView.viewer !== "player" || blueView.viewer !== "player") {
-      throw new Error("unreachable: player viewer produced a non-player RoomView");
-    }
-    const shell = toRoomView(room, puzzle, { kind: "spectator" }, now);
-    if (shell.viewer !== "spectator") {
-      throw new Error("unreachable: spectator viewer produced a non-spectator RoomView");
-    }
-    return { ...shell, red: redView.you, blue: blueView.you };
+  private sendState(ws: WebSocket, now = Date.now()): void {
+    const attachment = this.readAttachment(ws);
+    if (!attachment || !this.room) return;
+    const view = toRoomView(this.room, findPuzzle(this.room.puzzleId), this.viewerFor(attachment), now);
+    this.safeSend(ws, { t: "state", room: view });
   }
 
-  private async broadcastState(): Promise<void> {
-    if (!this.room) return;
+  private broadcastState(): void {
     const now = Date.now();
-    for (const ws of this.ctx.getWebSockets()) {
-      const attachment = this.readAttachment(ws);
-      if (!attachment) continue;
-      const view = this.buildView(this.viewerFor(attachment), now);
-      this.safeSend(ws, { t: "state", room: view });
-    }
+    for (const ws of this.ctx.getWebSockets()) this.sendState(ws, now);
   }
 
-  private sendToTeam(team: TeamId, msg: ServerMsg): void {
-    for (const ws of this.ctx.getWebSockets()) {
-      const attachment = this.readAttachment(ws);
-      if (attachment && this.currentTeam(attachment) === team) this.safeSend(ws, msg);
-    }
-  }
-
-  private broadcastExceptTeam(team: TeamId, msg: ServerMsg): void {
-    for (const ws of this.ctx.getWebSockets()) {
-      const attachment = this.readAttachment(ws);
-      if (!attachment) continue;
-      if (this.currentTeam(attachment) === team) continue;
-      this.safeSend(ws, msg);
-    }
+  private broadcast(msg: ServerMsg): void {
+    for (const ws of this.ctx.getWebSockets()) this.safeSend(ws, msg);
   }
 
   // One dead socket must never abort a broadcast loop.

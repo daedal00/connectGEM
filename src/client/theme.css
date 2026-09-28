@@ -6,10 +6,15 @@
   --tile-selected: #5a594e;
   --page: #fff;
   --ink: #121212;
-  --muted: #7f7f7f;
+  --muted: #6f6f6f;
   --line: #d9d9d3;
+  --heart: #d6336c;
+  --good: #2f9e44;
+  --bad: #c92a2a;
   --red: #c8553d;
   --blue: #3d6cc8;
+  --orange: #d9822b;
+  --teal: #16918a;
 }
 
 * { box-sizing: border-box; }
@@ -22,45 +27,77 @@ body {
   -webkit-text-size-adjust: 100%;
 }
 
+a { color: var(--blue); }
+
+/* Team colour as a variable, so every team-coloured thing is one rule. */
+.red { --team: var(--red); }
+.blue { --team: var(--blue); }
+.orange { --team: var(--orange); }
+.teal { --team: var(--teal); }
+
+/* ================= phone (captain + leader) ================= */
+
 .wrap {
   max-width: 560px;
   margin: 0 auto;
-  padding: 16px 12px 48px;
+  padding: 16px 16px 48px;
 }
 
 h1 { font-size: 1.35rem; letter-spacing: -0.01em; margin: 0 0 2px; }
-.scripture { color: var(--muted); font-size: 0.8rem; margin: 0 0 16px; }
+h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 12px; }
+.scripture { color: var(--muted); font-size: 0.8rem; margin: 0 0 12px; }
+.lede { color: var(--muted); font-size: 0.95rem; line-height: 1.4; margin: 6px 0 18px; }
 
-/* --- status --- */
 .status { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; padding: 6px 0; }
 .status.open { color: var(--muted); }
 .status.connecting, .status.reconnecting { color: #b45309; font-weight: 700; }
 
-.topbar { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.clock { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.85rem; }
+.topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }
+
+.team-pill {
+  background: var(--team); color: #fff; font-weight: 800; font-size: 0.75rem;
+  padding: 6px 10px; border-radius: 999px; text-transform: uppercase; white-space: nowrap;
+}
+.team-text { color: var(--team); }
+
+.turn-strip {
+  border-radius: 8px; padding: 12px; margin-bottom: 12px; text-align: center;
+  font-weight: 800; font-size: 0.95rem; background: var(--tile); color: var(--ink);
+}
+.turn-strip.mine { background: var(--team, var(--ink)); color: #fff; }
 
 /* --- solved bands --- */
 .band {
+  position: relative;
   border-radius: 6px;
   padding: 10px 8px;
   margin-bottom: 8px;
   text-align: center;
   color: #121212;
 }
+.band.missed { opacity: 0.75; }
 .band-name { font-weight: 800; text-transform: uppercase; font-size: 0.8rem; letter-spacing: 0.02em; }
 .band-words { font-size: 0.8rem; margin-top: 2px; }
+.band-badge {
+  position: absolute; top: 6px; right: 6px;
+  background: var(--team, #121212); color: #fff;
+  font-size: 0.6rem; font-weight: 800; letter-spacing: 0.04em;
+  padding: 2px 6px; border-radius: 999px; text-transform: uppercase;
+}
+.band-badge.free { background: rgba(0, 0, 0, 0.45); }
 
 /* --- grid --- */
 .grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 8px;
-  margin-bottom: 14px;
+  margin-bottom: 8px;
 }
 
 .tile {
   position: relative;
   aspect-ratio: 1 / 1;
+  display: flex; align-items: center; justify-content: center; text-align: center;
   border: none;
   border-radius: 6px;
   background: var(--tile);
@@ -71,12 +108,13 @@ h1 { font-size: 1.35rem; letter-spacing: -0.01em; margin: 0 0 2px; }
   font-size: clamp(0.6rem, 3.4vw, 1rem);
   line-height: 1.05;
   padding: 2px;
-  cursor: pointer;
   word-break: break-word;
   font-family: inherit;
+  transition: background 0.15s, color 0.15s;
 }
+button.tile { cursor: pointer; }
 .tile.long { font-size: clamp(0.45rem, 2.5vw, 0.8rem); }
-.tile:focus-visible { outline: 3px solid #3d6cc8; outline-offset: 2px; }
+.tile:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
 
 /* Selection is never signalled by colour alone: a selected tile also inverts
    and carries a visible ring, for colour-blind players and bright halls. */
@@ -86,22 +124,6 @@ h1 { font-size: 1.35rem; letter-spacing: -0.01em; margin: 0 0 2px; }
   box-shadow: inset 0 0 0 3px #121212;
 }
 
-/* Who on your team tapped this tile. The shared board is the whole point. */
-.tapper {
-  position: absolute;
-  left: 0; right: 0; bottom: 3px;
-  font-size: 0.5rem;
-  font-weight: 600;
-  text-transform: none;
-  letter-spacing: 0;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 0 3px;
-}
-.tile.selected .tapper { color: #e6e6e6; }
-
 @keyframes shake {
   0%, 100% { transform: translateX(0); }
   20% { transform: translateX(-6px); }
@@ -110,7 +132,6 @@ h1 { font-size: 1.35rem; letter-spacing: -0.01em; margin: 0 0 2px; }
   80% { transform: translateX(4px); }
 }
 .grid.shake { animation: shake 0.4s; }
-@media (prefers-reduced-motion: reduce) { .grid.shake { animation: none; } }
 
 /* --- controls --- */
 .controls { display: flex; gap: 8px; margin-bottom: 14px; }
@@ -126,68 +147,31 @@ button.action {
   cursor: pointer;
   font-family: inherit;
 }
+button.action.wide { display: block; width: 100%; margin-bottom: 12px; }
 button.action.primary { background: var(--ink); color: #fff; }
 button.action:disabled { opacity: 0.35; cursor: not-allowed; }
-button.action:focus-visible { outline: 3px solid #3d6cc8; outline-offset: 2px; }
+button.action:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
 
-.mistakes { display: flex; align-items: center; gap: 6px; justify-content: center; font-size: 0.8rem; margin-bottom: 12px; }
-.dot { width: 12px; height: 12px; border-radius: 50%; background: var(--tile-selected); }
-.dot.spent { background: var(--line); }
+.flash { text-align: center; font-weight: 800; min-height: 1.4em; margin: 4px 0 10px; font-size: 0.95rem; }
+.flash.good { color: var(--good); }
+.flash.bad { color: var(--bad); }
 
-.flash { text-align: center; font-weight: 700; min-height: 1.4em; margin-bottom: 8px; font-size: 0.9rem; }
+.hearts { display: inline-flex; gap: 2px; color: var(--heart); letter-spacing: 0; }
+.heart.spent { color: var(--line); }
 
-/* --- opponent --- */
-.opponent {
-  border-top: 1px solid var(--line);
-  margin-top: 18px;
-  padding-top: 12px;
-  font-size: 0.85rem;
-  color: var(--muted);
-  display: flex;
-  justify-content: space-between;
+.scores { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin: 14px 0; }
+.score {
+  border-left: 5px solid var(--team); background: #fafaf7; border-radius: 6px;
+  padding: 8px 10px; font-size: 0.85rem; display: flex; flex-direction: column; gap: 2px;
 }
+.score strong { color: var(--team); }
+.score.up { background: color-mix(in srgb, var(--team) 14%, #fff); }
+.score.out { opacity: 0.45; }
 
-/* --- join --- */
+/* --- forms --- */
 .field { display: block; margin-bottom: 14px; }
-.field span { display: block; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 5px; color: var(--muted); }
-.field input {
-  width: 100%;
-  padding: 13px;
-  font-size: 1rem;
-  border: 1px solid var(--ink);
-  border-radius: 6px;
-  font-family: inherit;
-}
-.field input:focus-visible { outline: 3px solid #3d6cc8; outline-offset: 1px; }
-.code-input { text-transform: uppercase; letter-spacing: 0.3em; font-weight: 800; text-align: center; }
-
-.teams { display: flex; gap: 8px; margin-bottom: 20px; }
-.team-btn {
-  flex: 1; padding: 15px; border-radius: 6px; font-weight: 800; font-size: 0.95rem;
-  border: 2px solid var(--line); background: #fff; cursor: pointer; font-family: inherit;
-}
-.team-btn:focus-visible { outline: 3px solid #3d6cc8; outline-offset: 2px; }
-.team-btn.red.on { border-color: var(--red); background: var(--red); color: #fff; }
-.team-btn.blue.on { border-color: var(--blue); background: var(--blue); color: #fff; }
-
-.winner { text-align: center; font-size: 1.15rem; font-weight: 800; margin: 14px 0; }
-.error { color: #b91c1c; font-size: 0.85rem; text-align: center; min-height: 1.2em; }
-
-/* A tile only your teammates have tapped reads differently from one you
-   tapped yourself - on a board ten people share, "who picked this" is the
-   information that matters most. */
-.tile.selected.theirs { background: #8a8880; box-shadow: inset 0 0 0 3px #5a594e; }
-.hint { text-align: center; font-size: 0.78rem; color: var(--muted); margin: -6px 0 12px; }
-
-.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-
-/* --- leader console + big screen --- */
-
-/* The room code is read off a TV across a hall, so it is the largest thing
-   on the page by a wide margin. */
-.room-code { font-size: 2.6rem; font-weight: 800; letter-spacing: 0.12em; margin: 0 0 2px; }
-
-.field select {
+.field > span { display: block; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 5px; color: var(--muted); }
+.field input, .field select {
   width: 100%;
   padding: 13px;
   font-size: 1rem;
@@ -196,32 +180,136 @@ button.action:focus-visible { outline: 3px solid #3d6cc8; outline-offset: 2px; }
   background: #fff;
   font-family: inherit;
 }
-.field select:focus-visible { outline: 3px solid #3d6cc8; outline-offset: 1px; }
+.field input:focus-visible, .field select:focus-visible { outline: 3px solid var(--blue); outline-offset: 1px; }
+.code-input { text-transform: uppercase; letter-spacing: 0.3em; font-weight: 800; text-align: center; }
 
-/* The confirms-required picker reuses .team-btn without a team colour. */
-.team-btn.on { border-color: var(--ink); background: var(--ink); color: #fff; }
+.teams { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 20px; }
+.team-btn {
+  padding: 16px 10px; border-radius: 8px; font-weight: 800; font-size: 1rem;
+  border: 3px solid var(--team); background: #fff; color: var(--team); cursor: pointer; font-family: inherit;
+  display: flex; flex-direction: column; gap: 4px; align-items: center;
+}
+.team-btn small { font-weight: 500; font-size: 0.7rem; color: var(--muted); }
+.team-btn.on { background: var(--team); color: #fff; }
+.team-btn.on small { color: rgba(255, 255, 255, 0.85); }
+.team-btn:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
 
-.boards { display: flex; gap: 14px; align-items: flex-start; }
-.column { flex: 1; min-width: 0; border-top: 4px solid var(--line); padding-top: 10px; }
-.column.red { border-top-color: var(--red); }
-.column.blue { border-top-color: var(--blue); }
-.column.won { background: #fffbe6; }
-.column-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-.column-head h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 6px; }
-.column .hint { margin: 0 0 8px; text-align: left; }
+.stepper { display: flex; gap: 6px; }
+.step {
+  flex: 1; padding: 12px 0; border-radius: 6px; border: 2px solid var(--line); background: #fff;
+  font-weight: 800; font-size: 1rem; cursor: pointer; font-family: inherit;
+}
+.step.on { border-color: var(--ink); background: var(--ink); color: #fff; }
+.step:disabled { opacity: 0.4; }
 
-.roster h3 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 6px; }
-.roster ul { list-style: none; margin: 0 0 8px; padding: 0; font-size: 0.85rem; }
-.roster li { padding: 2px 0; }
-/* A player whose phone locked is still on the team - dim, not gone. */
-.roster li.away { color: var(--muted); }
+.winner { text-align: center; font-size: 1.3rem; font-weight: 800; margin: 10px 0 14px; }
+.error { color: var(--bad); font-size: 0.85rem; text-align: center; min-height: 1.2em; }
+.hint { text-align: center; font-size: 0.8rem; color: var(--muted); margin: 0 0 12px; }
+.hint.left { text-align: left; line-height: 1.6; }
+.footer-links { text-align: center; font-size: 0.85rem; margin-top: 28px; color: var(--muted); }
 
-/* The big screen is a laptop on a TV, not a phone: let it use the width and
-   drop the tap affordances, since nothing here is interactive. */
-.wrap.screen { max-width: 1100px; padding: 24px; }
-.wrap.screen .tile { cursor: default; font-size: clamp(0.7rem, 1.6vw, 1.3rem); }
-.wrap.screen .tile.long { font-size: clamp(0.55rem, 1.1vw, 0.95rem); }
-.wrap.screen h1 { font-size: 2rem; }
-.wrap.screen .winner { font-size: 2rem; }
-.wrap.screen .band-name { font-size: 1rem; }
-.wrap.screen .band-words { font-size: 0.95rem; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* --- leader console --- */
+.room-code { font-size: 2.4rem; font-weight: 800; letter-spacing: 0.12em; margin: 0; }
+.panel { border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+.roster { list-style: none; padding: 0; margin: 0 0 16px; font-size: 0.9rem; }
+.roster li { padding: 4px 0; }
+.roster .away { color: var(--muted); }
+.roster .hint { display: inline; margin: 0; }
+.key-row.solved { opacity: 0.4; }
+
+/* ================= big screen (projector) =================
+   A laptop on a projector across a hall. Everything is sized off the
+   viewport so the same page fills a 720p projector and a 4K TV, and the
+   four rows of tiles always fit without scrolling. */
+
+.screen {
+  --row: 14.5vh;
+  min-height: 100vh;
+  padding: 2.5vh 3vw;
+  display: flex;
+  flex-direction: column;
+  gap: 2vh;
+  overflow: hidden;
+}
+
+.screen-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 3vw; }
+.screen-head h1 { font-size: 5vh; margin: 0; letter-spacing: -0.02em; }
+.kicker { font-size: 2.2vh; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 700; }
+.join-mini { font-size: 2.2vh; color: var(--muted); text-align: right; }
+.join-mini strong { color: var(--ink); }
+.join-mini .code { letter-spacing: 0.15em; font-size: 3vh; }
+.screen .status { font-size: 1.8vh; }
+
+.screen-body { flex: 1; display: flex; gap: 2.5vw; min-height: 0; }
+.stage { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1.2vh; }
+
+.turn-banner {
+  background: var(--team, var(--ink)); color: #fff; border-radius: 1vh;
+  font-size: 4.2vh; font-weight: 900; letter-spacing: 0.04em;
+  padding: 1.4vh 2vw; display: flex; justify-content: space-between; align-items: baseline;
+}
+.turn-banner.tie { --team: var(--ink); }
+.turn-sub { font-size: 2.2vh; font-weight: 700; opacity: 0.85; text-transform: uppercase; }
+
+.screen .band {
+  height: var(--row); margin: 0; border-radius: 1vh;
+  display: flex; flex-direction: column; justify-content: center;
+}
+.screen .band-name { font-size: 3vh; }
+.screen .band-words { font-size: 2.6vh; margin-top: 0.6vh; }
+.screen .band-badge { top: 1vh; right: 1vh; font-size: 1.8vh; padding: 0.4vh 1vh; }
+
+.screen .grid { gap: 1.2vh; margin: 0; }
+.screen .tile {
+  aspect-ratio: auto; height: var(--row); border-radius: 1vh;
+  font-size: 3.4vh; padding: 0.5vh;
+}
+.screen .tile.long { font-size: 2.5vh; }
+.screen .tile.selected { box-shadow: inset 0 0 0 0.5vh #121212; transform: scale(0.97); }
+
+.scoreboard { width: 24vw; display: flex; flex-direction: column; gap: 1.5vh; }
+.team-card {
+  border-left: 1.2vh solid var(--team); background: #fafaf7; border-radius: 1vh;
+  padding: 1.6vh 1.4vw; transition: background 0.2s, opacity 0.2s, transform 0.2s;
+}
+.team-card.up { background: color-mix(in srgb, var(--team) 16%, #fff); transform: translateX(-0.6vw); box-shadow: 0 0.6vh 2vh rgba(0, 0, 0, 0.12); }
+.team-card.out { opacity: 0.4; }
+.team-card.won { background: #fff6cf; }
+.team-card-head { display: flex; align-items: center; gap: 1vw; }
+.team-name { font-size: 3.2vh; font-weight: 900; color: var(--team); letter-spacing: 0.04em; }
+.tag { font-size: 1.6vh; font-weight: 800; background: var(--team); color: #fff; padding: 0.3vh 0.8vh; border-radius: 999px; }
+.team-card.out .tag { background: var(--muted); }
+.team-points { font-size: 6vh; font-weight: 900; line-height: 1.1; }
+.team-points small { font-size: 2.2vh; color: var(--muted); font-weight: 700; }
+.team-card .hearts { font-size: 3.4vh; gap: 0.3vw; }
+.team-captains { font-size: 1.9vh; color: var(--muted); margin-top: 0.8vh; }
+.team-total { font-size: 1.9vh; font-weight: 700; margin-top: 0.4vh; }
+
+/* Lobby: the room code and join address are the only things that matter. */
+.lobby { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 1vh; }
+.lobby-step { font-size: 2.6vh; color: var(--muted); margin: 0; }
+.lobby-url { font-size: min(6vh, 3.2vw); font-weight: 800; margin-bottom: 2vh; overflow-wrap: anywhere; }
+.big-code { font-size: 18vh; font-weight: 900; letter-spacing: 0.15em; line-height: 1; margin-bottom: 3vh; }
+.lobby-teams { display: flex; gap: 2vw; justify-content: center; width: 100%; }
+.lobby-teams .team-card { width: 18vw; text-align: left; }
+.rules { max-width: 70vw; font-size: 2.3vh; line-height: 1.45; color: var(--muted); margin-top: 3vh; }
+.screen:not(.phase-lobby) > .big-code { margin: 30vh auto 0; text-align: center; }
+
+/* Guess result, shown over the board for a couple of seconds. */
+@keyframes pop { from { transform: translate(-50%, -50%) scale(0.85); opacity: 0; } to { transform: translate(-50%, -50%) scale(1); opacity: 1; } }
+.flash-overlay {
+  position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  background: #fff; border-radius: 2vh; padding: 3vh 4vw;
+  font-size: 6vh; font-weight: 900; text-align: center; max-width: 80vw;
+  box-shadow: 0 2vh 6vh rgba(0, 0, 0, 0.3); border: 1vh solid var(--ink);
+  animation: pop 0.2s ease-out;
+}
+.flash-overlay.good { border-color: var(--good); color: var(--good); }
+.flash-overlay.bad { border-color: var(--bad); color: var(--bad); }
+
+@media (prefers-reduced-motion: reduce) {
+  .grid.shake, .flash-overlay { animation: none; }
+  .team-card, .tile { transition: none; }
+}
