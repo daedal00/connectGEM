@@ -1,25 +1,38 @@
 # Connect GEM
 
-An Acts 4:32-35 take on the New York Times "Connections" game, built for a church youth
-group station. Two teams race the same 16-tile board on their own phones. See `plan.md`
-for the full design.
+A take on the New York Times "Connections" game for a church youth group, played on one
+projected screen. Teams take turns on a shared board: a warm-up round with everyday words
+teaches the game, then Acts 4:29-37 rounds build on the passage.
 
-The team mechanic is the point: every member sees the same board, taps are broadcast with
-the tapper's name, and a guess needs two different people to press Submit. One loud person
-cannot run the round alone.
+## How a round works
 
-## Running a station game
+- One 16-word board on the projector, shared by every team (2-4 teams).
+- Teams take turns. The team talks it over, and its **captain** taps the four words on
+  their phone and submits. Everyone watches the picks appear live on the big screen.
+- **Correct:** the team scores by difficulty (yellow 1, green 2, blue 3, purple 4) and the
+  turn passes. Harder groups are worth more, so going for purple is a real choice.
+- **Wrong or one away:** the team loses a heart and the turn passes. The next team hears the
+  "one away" too, and is meant to use it.
+- Once three groups are solved, the last four words reveal themselves for no points.
+- A team with no hearts left sits out. The round ends when the board is cleared or every
+  team is out, or when the leader ends it.
+- **Winner:** most points, then fewest mistakes. Points also add up to a night total
+  across rounds, and the first turn rotates each round so no team always goes first.
 
-1. Open `/admin` on your laptop and log in with the leader password.
-2. **New room** gives you a four-letter code. Pick a puzzle and set how many teammates must
-   confirm a guess (2 is the default).
-3. Put `/screen/CODE` on the TV. It needs the same password and shows both boards side by side.
-4. Players go to the site root, enter the code and their name, and pick a team.
-5. **Start round.** Four mistakes per team. The round ends when both teams have either solved
-   all four groups or run out of mistakes, or when you press **End round**.
-6. **Reset** clears both teams' progress but keeps everyone connected, ready for the next puzzle.
+## Running the night
 
-Winner is most groups solved, then fewest mistakes, then whoever finished first.
+1. **Leader phone:** open `/admin`, log in with the leader password, and tap **New room**.
+2. **Projector:** open `/screen` on the laptop and type the room code. No login needed:
+   the screen shows only what every team can already see.
+3. **Captains:** one per team goes to `/play` (it's on the screen), enters the code and
+   their name, and picks a team.
+4. **Leader phone:** pick a puzzle (the warm-ups are listed first), set the number of teams
+   and lives, and **Start**. Between rounds, **Next puzzle** goes down the list.
+
+From the leader phone you can also **Skip turn**, **End round**, **Reset round**, or
+**Zero totals**. While a round runs you can tap in a guess for whichever team is up, for a
+team without a phone or a captain whose battery died. **Show answers** reveals the key on
+your phone only. It never reaches the screen or the captains.
 
 ## Dev
 
@@ -42,8 +55,8 @@ npm run e2e         # needs a dev server on :8799 and ADMIN_SECRET=test-secret-e
 ```
 
 `npm test` covers the rules. `npm run e2e` drives a real round against a real Durable Object
-and is the only check that covers the admin-token gate, the spectator/player split, and the
-two-distinct-confirms rule:
+and is the only check that covers the admin-token gate, the screen/player/admin split, turn
+enforcement on real sockets, and the leader playing for a team:
 
 ```
 printf 'ADMIN_SECRET=test-secret-e2e\n' > .dev.vars
@@ -63,9 +76,8 @@ admin route fails closed and no room can be created.
 
 Deployed to https://connect-gem.bibleboardbot.workers.dev
 
-## Known limitation
+## Adding puzzles
 
-A player is on one team at a time: joining a team leaves the other, and the abandoned tab
-loses its board. Someone who clears their browser storage gets a fresh identity and can join
-the other team to see its progress. Closing that properly needs a separate join code per
-team, which changes what the leader hands out at the door.
+Puzzles live in `src/puzzles.ts`. Each one is `warmup` or `scripture`, and has exactly four
+groups of four with no word repeated. That rule is checked when the module loads. The list order is
+the order **Next puzzle** walks, so keep the warm-ups first.

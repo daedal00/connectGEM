@@ -7,10 +7,9 @@ import type {
   CreateRoomResponse,
   SetPuzzleRequest,
   SetConfigRequest,
-  TeamId,
   Role,
 } from "../shared/types.ts";
-import { isValidConfirms } from "../shared/game.ts";
+import { isValidLives, isValidTeamCount } from "../shared/game.ts";
 import { puzzleSummaries } from "../puzzles.ts";
 
 // ADMIN_SECRET is a plain-text var/secret (see .dev.vars.example), not a
@@ -24,7 +23,7 @@ declare global {
 }
 
 const WS_ROUTE = /^\/api\/rooms\/([^/]+)\/ws$/;
-const ROOM_ACTION_ROUTE = /^\/api\/rooms\/([^/]+)\/(puzzle|start|reset|end|config)$/;
+const ROOM_ACTION_ROUTE = /^\/api\/rooms\/([^/]+)\/(puzzle|start|reset|end|skip|zero|config)$/;
 
 // --- Admin token: stateless HMAC-signed expiry, no session storage ---
 
@@ -172,12 +171,17 @@ async function handleRoomAction(request: Request, env: Env, code: string, action
       return actionResponse(await stub.resetRoom());
     case "end":
       return actionResponse(await stub.endRoom());
+    case "skip":
+      return actionResponse(await stub.skipRoom());
+    case "zero":
+      return actionResponse(await stub.zeroScores());
     case "config": {
-      const body = await readJson<Partial<SetConfigRequest>>(request);
-      if (!body || !isValidConfirms(body.confirmsRequired)) {
-        return badRequest("confirmsRequired must be an integer 1..4");
-      }
-      return actionResponse(await stub.setConfig(body.confirmsRequired));
+      const body = await readJson<SetConfigRequest>(request);
+      if (!body || typeof body !== "object") return badRequest("config body required");
+      const { teamCount, lives } = body;
+      if (teamCount !== undefined && !isValidTeamCount(teamCount)) return badRequest("teamCount must be an integer 2..4");
+      if (lives !== undefined && !isValidLives(lives)) return badRequest("lives must be an integer 1..6");
+      return actionResponse(await stub.setConfig({ teamCount, lives }));
     }
     default:
       return new Response("not found", { status: 404 });
@@ -197,9 +201,9 @@ async function handleAdminLogin(request: Request, env: Env): Promise<Response> {
 // --- WebSocket join ---
 // A browser WebSocket carries no headers, so identity + an optional admin
 // token both arrive as query params. This is the ONLY place client-supplied
-// role/team/name are read - everything downstream (room.ts) trusts what it's
+// role/name are read - everything downstream (room.ts) trusts what it's
 // handed because the only path to it is this Worker's own ROOM binding call.
-const NAME_MAX = 60; // ponytail: arbitrary bound, matches game.ts's word-length style; raise if it's ever too tight.
+const NAME_MAX = 24;
 const PLAYER_ID_MAX = 100;
 
 async function handleWsRoute(request: Request, env: Env, code: string): Promise<Response> {
@@ -210,23 +214,21 @@ async function handleWsRoute(request: Request, env: Env, code: string): Promise<
   const url = new URL(request.url);
   const playerId = (url.searchParams.get("playerId") ?? "").slice(0, PLAYER_ID_MAX);
   if (!playerId) return badRequest("playerId required");
-  const name = (url.searchParams.get("name") ?? "").slice(0, NAME_MAX);
-  const rawTeam = url.searchParams.get("team");
-  const team: TeamId | null = rawTeam === "red" || rawTeam === "blue" ? rawTeam : null;
+  const name = (url.searchParams.get("name") ?? "").trim().slice(0, NAME_MAX);
   const rawRole = url.searchParams.get("role");
-  const wantsPrivileged = rawRole === "screen" || rawRole === "admin";
-  // Verify BEFORE the socket is ever accepted (room.ts's fetch() only runs
-  // after this). An unverified socket is a player, full stop - role is never
-  // taken from the client's say-so alone.
-  const authenticated = wantsPrivileged ? await verifyAdmin(request, env) : false;
-  const role: Role = wantsPrivileged && authenticated ? (rawRole as Role) : "player";
+  // The big screen shows only what every team can already see, so it needs
+  // no credential. The admin view carries the answer key and may play for
+  // any team, so it is verified BEFORE the socket is accepted; a failed
+  // check is a plain player, never a privileged socket.
+  let role: Role = "player";
+  if (rawRole === "screen") role = "screen";
+  else if (rawRole === "admin" && (await verifyAdmin(request, env))) role = "admin";
 
   const forwardUrl = new URL(request.url);
+  forwardUrl.search = "";
   forwardUrl.searchParams.set("playerId", playerId);
   forwardUrl.searchParams.set("name", name);
-  forwardUrl.searchParams.set("team", team ?? "");
   forwardUrl.searchParams.set("role", role);
-  forwardUrl.searchParams.set("authenticated", authenticated ? "1" : "0");
   const forwardRequest = new Request(forwardUrl, { method: request.method, headers: request.headers });
 
   const stub = env.ROOM.get(env.ROOM.idFromName(code));

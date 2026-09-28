@@ -6,9 +6,8 @@
 //   npm run e2e
 //
 // This is the only check that exercises the admin-token gate, the
-// spectator/player split, and the two-distinct-confirms rule end to end.
-// The pure rules live in src/shared/game.test.ts; everything here needs a
-// real DO, real sockets, and real hibernation-style attachments.
+// screen/player/admin split, turn enforcement on real sockets, and the
+// leader playing for a team. Pure rules live in src/shared/game.test.ts.
 const BASE = 'http://localhost:8799'
 const WS = 'ws://localhost:8799'
 const PASSWORD = 'test-secret-e2e'
@@ -26,16 +25,17 @@ const post = (path, body, token) =>
     body: JSON.stringify(body ?? {}),
   })
 
-function connect(code, { playerId, name, team, role, token }) {
+function connect(code, { playerId, name, role, token }) {
   const q = new URLSearchParams({ playerId, name: name ?? '' })
-  if (team) q.set('team', team)
   if (role) q.set('role', role)
   if (token) q.set('token', token)
   const ws = new WebSocket(`${WS}/api/rooms/${code}/ws?${q}`)
   const frames = []
   ws.addEventListener('message', e => frames.push({ raw: e.data, msg: JSON.parse(e.data) }))
   ws.frames = frames
-  ws.latestView = () => [...frames].reverse().find(f => f.msg.t === 'state')?.msg.room ?? null
+  ws.view = () => [...frames].reverse().find(f => f.msg.t === 'state')?.msg.room ?? null
+  ws.errors = () => frames.filter(f => f.msg.t === 'error').map(f => f.msg.message)
+  ws.guesses = () => frames.filter(f => f.msg.t === 'guess').map(f => f.msg.event)
   return new Promise((res, rej) => {
     ws.addEventListener('open', () => res(ws))
     ws.addEventListener('error', rej)
@@ -43,179 +43,134 @@ function connect(code, { playerId, name, team, role, token }) {
 }
 
 const send = (ws, msg) => ws.send(JSON.stringify(msg))
-const settle = () => new Promise(r => setTimeout(r, 350))
+const settle = () => new Promise(r => setTimeout(r, 300))
+async function pick(ws, words) {
+  send(ws, { t: 'clear' })
+  for (const word of words) send(ws, { t: 'tap', word })
+  await settle()
+}
+
+// Answer key for acts4-unity, from src/puzzles.ts.
+const ONE = ['HEART', 'MIND', 'SOUL', 'SPIRIT']
+const DID = ['SOLD', 'BROUGHT', 'LAID', 'DISTRIBUTED']
+const OWNED = ['LAND', 'HOUSES', 'MONEY', 'POSSESSIONS']
+const WRONG = ['SOLD', 'LAND', 'AMAZING', 'SAVING']
 
 // --- auth ---
-const badLogin = await post('/api/admin/login', { password: 'wrong' })
-check('login with wrong password rejected', badLogin.status === 401, `status=${badLogin.status}`)
-
+check('login with wrong password rejected', (await post('/api/admin/login', { password: 'wrong' })).status === 401)
 const loginRes = await post('/api/admin/login', { password: PASSWORD })
-check('login with correct password succeeds', loginRes.ok, `status=${loginRes.status}`)
+check('login with correct password succeeds', loginRes.ok)
 const { token } = await loginRes.json()
+check('room creation without token rejected', (await post('/api/rooms', {}, null)).status === 401)
+check(
+  'room creation with forged HMAC rejected',
+  (await post('/api/rooms', {}, `${Date.now() + 1e6}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`)).status === 401,
+)
+const { puzzles } = await (await fetch(BASE + '/api/puzzles', { headers: { authorization: `Bearer ${token}` } })).json()
+check('puzzle list carries no answer key', !JSON.stringify(puzzles).includes('HEART'))
+check('warm-ups are listed before scripture', puzzles[0].kind === 'warmup' && puzzles.at(-1).kind === 'scripture')
 
-const noAuth = await post('/api/rooms', {}, null)
-check('room creation without token rejected', noAuth.status === 401, `status=${noAuth.status}`)
-
-const forged = await post('/api/rooms', {}, `${Date.now() + 1e6}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`)
-check('room creation with forged HMAC rejected', forged.status === 401, `status=${forged.status}`)
-
-const puzzlesRes = await fetch(BASE + '/api/puzzles', { headers: { authorization: `Bearer ${token}` } })
-const { puzzles } = await puzzlesRes.json()
-check('puzzle list carries no answer key', !JSON.stringify(puzzles).includes('HEART'), JSON.stringify(puzzles[0]))
-
-// --- room setup ---
+// --- room + sockets ---
 const { code } = await (await post('/api/rooms', {}, token)).json()
 check('room created', typeof code === 'string' && code.length === 4, `code=${code}`)
 check('setPuzzle ok', (await post(`/api/rooms/${code}/puzzle`, { puzzleId: 'acts4-unity' }, token)).ok)
-check('start ok', (await post(`/api/rooms/${code}/start`, {}, token)).ok)
+check('config rejects 5 teams', (await post(`/api/rooms/${code}/config`, { teamCount: 5 }, token)).status === 400)
+check('config: 3 teams, 2 lives', (await post(`/api/rooms/${code}/config`, { teamCount: 3, lives: 2 }, token)).ok)
 
-// --- sockets ---
-const red1 = await connect(code, { playerId: 'r1', name: 'Ada', team: 'red' })
-const red2 = await connect(code, { playerId: 'r2', name: 'Grace', team: 'red' })
-const blue1 = await connect(code, { playerId: 'b1', name: 'Linus', team: 'blue' })
-// SECURITY: asks for role=screen with NO admin token.
-const sneak = await connect(code, { playerId: 's1', name: 'Sneak', team: 'blue', role: 'screen' })
-const screen = await connect(code, { playerId: 'tv', name: 'TV', role: 'screen', token })
-await settle()
-
-check('unauthenticated role=screen is downgraded to player', sneak.latestView().viewer === 'player', `viewer=${sneak.latestView().viewer}`)
-check('authenticated role=screen is a spectator', screen.latestView().viewer === 'spectator', `viewer=${screen.latestView().viewer}`)
-check('spectator sees both boards', screen.latestView().red.board.length === 16 && screen.latestView().blue.board.length === 16)
-
-const redBoard = red1.latestView().you.board
-check('red sees its own 16 tiles', redBoard.length === 16)
-check('player view has no opponent board field', red1.latestView().opponent.board === undefined)
-check('both teams get the identical starting order', JSON.stringify(redBoard) === JSON.stringify(blue1.latestView().you.board))
-
-// --- the leader console's own socket ---
+const screen = await connect(code, { playerId: 'tv', name: 'TV', role: 'screen' })
+const red = await connect(code, { playerId: 'r1', name: 'Ada', role: 'player' })
+const blue = await connect(code, { playerId: 'b1', name: 'Linus', role: 'player' })
 const admin = await connect(code, { playerId: 'admin1', name: 'Leader', role: 'admin', token })
+const fake = await connect(code, { playerId: 'fake1', name: 'Fake', role: 'admin', token: `${Date.now() + 1e6}.bm90YXJlYWxtYWM` })
 await settle()
-check('authenticated role=admin is a spectator', admin.latestView().viewer === 'spectator')
-check('leader sees both rosters', admin.latestView().red.players !== undefined && admin.latestView().blue.players !== undefined)
-const fakeAdmin = await connect(code, { playerId: 'fake1', name: 'Fake', role: 'admin', token: `${Date.now() + 1e6}.bm90YXJlYWxtYWM` })
-await settle()
-// Downgraded to a player, and since it asked for no team it lands on the
-// 'unassigned' view - which carries neither board.
-check(
-  'role=admin with a forged token gets no spectator view',
-  fakeAdmin.latestView().viewer === 'unassigned',
-  `viewer=${fakeAdmin.latestView().viewer}`,
-)
-check(
-  'forged-token view carries no board at all',
-  fakeAdmin.frames.every(f => f.msg.t !== 'state' || (!('red' in f.msg.room) && !('you' in f.msg.room))),
-)
-fakeAdmin.close()
 
-// --- deep links must serve the SPA shell, not 404 ---
-for (const path of ['/admin', `/screen/${code}`, `/play/${code}`]) {
+check('screen needs no login', screen.view()?.viewer === 'screen')
+check('admin with a valid token is admin', admin.view()?.viewer === 'admin')
+check('admin view carries the answer key', admin.view()?.answerKey?.length === 4)
+check('forged admin token is downgraded to a player', fake.view()?.viewer === 'player')
+check('no answer key anywhere but the admin socket',
+  [screen, red, blue, fake].every(ws => ws.frames.every(f => !f.raw.includes('"members"') && !f.raw.includes('ONE ___'))))
+check('lobby board is empty', screen.view().board.length === 0)
+check('three teams in the view', screen.view().teams.map(t => t.id).join() === 'red,blue,orange')
+
+send(red, { t: 'join', team: 'red' })
+send(blue, { t: 'join', team: 'blue' })
+send(fake, { t: 'join', team: 'teal' })
+await settle()
+check('captain joins red', red.view().you.team === 'red')
+check('captain names reach the screen', screen.view().teams[0].players[0]?.name === 'Ada')
+check('an inactive team cannot be joined', fake.errors().includes('that team is not playing'))
+check('player ids never reach the screen', screen.frames.every(f => !f.raw.includes('"r1"') && !f.raw.includes('"b1"')))
+fake.close()
+
+for (const path of ['/admin', '/screen', `/screen/${code}`, `/play/${code}`]) {
   const res = await fetch(BASE + path)
-  check(`${path} serves the SPA shell`, res.ok && (res.headers.get('content-type') ?? '').includes('text/html'), `status=${res.status}`)
+  check(`${path} serves the SPA shell`, res.ok && (res.headers.get('content-type') ?? '').includes('text/html'))
 }
 
-// --- a phone must not hold both boards by joining the other team ---
-const tabA = await connect(code, { playerId: 'cheat', name: 'Cheat', team: 'red' })
+// --- the round ---
+check('start ok', (await post(`/api/rooms/${code}/start`, {}, token)).ok)
 await settle()
-check('second phone joins red', tabA.latestView().team === 'red')
-const tabB = await connect(code, { playerId: 'cheat', name: 'Cheat', team: 'blue' })
+check('red goes first', screen.view().turn === 'red' && red.view().you.canAct && !blue.view().you.canAct)
+check('board has 16 words', screen.view().board.length === 16)
+
+send(blue, { t: 'join', team: 'red' }); await settle()
+check('teams are locked mid-round', blue.errors().includes('teams are locked until the round ends'))
+send(blue, { t: 'tap', word: 'HEART' }); await settle()
+check('blue cannot tap on red\'s turn', blue.errors().includes('not your turn') && screen.view().selection.length === 0)
+send(screen, { t: 'tap', word: 'HEART' }); await settle()
+check('the screen is read-only', screen.errors().includes('the big screen is read-only'))
+
+await pick(red, ONE)
+check('red\'s picks show live on the screen', screen.view().selection.length === 4)
+send(red, { t: 'submit' }); await settle()
+const solved = screen.guesses().at(-1)
+check('correct guess is announced to everyone', solved?.outcome === 'correct' && solved.team === 'red' && blue.guesses().length === 1)
+check('red scores 1 for yellow', screen.view().teams[0].points === 1)
+check('turn passes to blue', screen.view().turn === 'blue')
+check('12 words left', screen.view().board.length === 12)
+
+await pick(blue, WRONG)
+send(blue, { t: 'submit' }); await settle()
+check('wrong guess costs blue a heart', screen.view().teams[1].mistakes === 1)
+check('turn passes to orange', screen.view().turn === 'orange')
+
+// Orange has no captain: the leader plays for them.
+await pick(admin, DID)
+send(admin, { t: 'submit' }); await settle()
+check('leader can play for the team on turn', screen.view().teams[2].points === 2)
+check('back to red', screen.view().turn === 'red')
+
+check('skip ok', (await post(`/api/rooms/${code}/skip`, {}, token)).ok)
 await settle()
-check('same playerId joining blue gets the blue board', tabB.latestView().team === 'blue')
-check('the abandoned red tab loses its board', tabA.latestView().viewer === 'unassigned', `viewer=${tabA.latestView().viewer}`)
-send(tabA, { t: 'tap', word: 'HEART' })
+check('skip passes the turn without a penalty', screen.view().turn === 'blue' && screen.view().teams[0].mistakes === 0)
+
+send(blue, { t: 'tap', word: 'LAND' }); send(blue, { t: 'submit' }); await settle()
+check('under-filled submit is refused, selection kept', blue.errors().includes('pick exactly 4 words') && screen.view().selection.length === 1)
+
+await pick(blue, OWNED)
+send(blue, { t: 'submit' }); await settle()
+const view = screen.view()
+check('third group ends the round', view.phase === 'done')
+check('last group auto-revealed for nobody', view.solved.at(-1)?.by === null && view.solved.length === 4)
+check('blue wins on points', view.result?.winner === 'blue', JSON.stringify(view.result))
+
+// --- next round ---
+check('puzzle change ok', (await post(`/api/rooms/${code}/puzzle`, { puzzleId: 'warmup-space' }, token)).ok)
 await settle()
-check('the abandoned tab cannot act on its old team', tabA.frames.some(f => f.msg.t === 'error' && f.msg.message === 'join a team first'))
-tabA.close(); tabB.close(); await settle()
-
-// --- shared board: a tap by one teammate reaches the other ---
-const word = 'HEART'
-send(red1, { t: 'tap', word })
+check('new puzzle is back in the lobby', screen.view().phase === 'lobby' && screen.view().solved.length === 0)
+check('night totals carried over', screen.view().teams.map(t => t.total).join() === '1,3,2')
+check('captains kept their teams', red.view().you.team === 'red')
+check('start round 2 ok', (await post(`/api/rooms/${code}/start`, {}, token)).ok)
 await settle()
-check('teammate sees the tap with the tapper id', red2.latestView().you.selection[word]?.includes('r1') === true, JSON.stringify(red2.latestView().you.selection))
-check('opponent never sees red selection', blue1.frames.every(f => !f.raw.includes('"r1"')))
-
-// --- two distinct confirms required ---
-for (const w of ['MIND', 'SOUL', 'SPIRIT']) send(red1, { t: 'tap', word: w })
+check('round 2 starts with blue', screen.view().turn === 'blue')
+check('zero ok', (await post(`/api/rooms/${code}/zero`, {}, token)).ok)
 await settle()
-send(red1, { t: 'submit' })
-send(red1, { t: 'submit' }) // same player twice must not count twice
+check('totals zeroed', screen.view().teams.every(t => t.total === 0))
+check('end ok', (await post(`/api/rooms/${code}/end`, {}, token)).ok)
 await settle()
-check('one player cannot solve alone (idempotent confirm)', red1.latestView().you.solved.length === 0, `confirms=${JSON.stringify(red1.latestView().you.confirms)}`)
-check('double submit from one player counts once', red1.latestView().you.confirms.length === 1)
+check('leftover groups revealed after end', screen.view().leftover.length === 4)
 
-send(red2, { t: 'submit' })
-await settle()
-check('two distinct confirms solve the group', red1.latestView().you.solved.length === 1, JSON.stringify(red1.latestView().you.solved.map(g => g.name)))
-check('solved group revealed to the solving team', red1.frames.some(f => f.msg.t === 'yourResult' && f.msg.outcome.kind === 'correct'))
-
-// --- THE leak test: nothing about the answer reaches blue ---
-// Both teams race the SAME puzzle, so the four words are legitimately on
-// blue's own board. The leak surface is the GROUPING, not the words: a group
-// name, a group id, or red's board/selection/guesses shrinking in blue's view.
-const blueText = blue1.frames.map(f => f.raw).join('\n')
-for (const leak of ['ONE IN', 'g0', 'g1', 'g2', 'g3', 'difficulty', 'members'])
-  check(`blue frames never contain "${leak}"`, !blueText.includes(leak))
-check('blue board still has all 16 tiles after red solves', blue1.latestView().you.board.length === 16)
-check('red board lost the 4 solved tiles', red1.latestView().you.board.length === 12)
-check(
-  'opponent object exposes only counts',
-  JSON.stringify(Object.keys(blue1.latestView().opponent).sort()) ===
-    JSON.stringify(['finishedAt', 'mistakes', 'playerCount', 'solvedCount']),
-  JSON.stringify(blue1.latestView().opponent),
-)
-check('blue is told the opponent solved something', blue1.frames.some(f => f.msg.t === 'opponentResult' && f.msg.outcome.solved === true))
-check('opponentResult carries no group', blue1.frames.filter(f => f.msg.t === 'opponentResult').every(f => f.msg.outcome.group === undefined))
-check('blue sees opponent solvedCount only', blue1.latestView().opponent.solvedCount === 1)
-
-// --- spectator cannot act ---
-send(screen, { t: 'tap', word: 'LAND' })
-await settle()
-check('spectator action refused', screen.frames.some(f => f.msg.t === 'error' && f.msg.message === 'spectators cannot act'))
-
-// --- one away + mistakes ---
-send(red1, { t: 'clear' }); await settle()
-for (const w of ['SOLD', 'BROUGHT', 'LAID', 'LAND']) send(red1, { t: 'tap', word: w })
-await settle()
-send(red1, { t: 'submit' }); send(red2, { t: 'submit' }); await settle()
-check('one away detected', red1.frames.some(f => f.msg.t === 'yourResult' && f.msg.outcome.kind === 'oneAway'))
-check('one away costs a mistake', red1.latestView().you.mistakes === 1)
-
-// --- tap validation ---
-send(red1, { t: 'tap', word: 'NOTAWORD' }); await settle()
-check('unknown word rejected', red1.latestView().you.selection['NOTAWORD'] === undefined)
-send(red1, { t: 'tap', word: 'X'.repeat(500) }); await settle()
-check('over-long word rejected', Object.keys(red1.latestView().you.selection).every(k => k.length < 100))
-red1.send('{"t":"tap","word":"HEART","__proto__":{}}'); await settle()
-check('malformed message rejected', red1.frames.some(f => f.msg.t === 'error' && f.msg.message === 'malformed message'))
-
-// --- clock ---
-check('serverNow present and sane', Math.abs(red1.latestView().serverNow - Date.now()) < 10000)
-check('solution withheld while playing', red1.latestView().solution === null && red1.latestView().result === null)
-
-// --- an invalid (under-filled) guess must not destroy the team's selection ---
-send(red1, { t: 'clear' }); await settle()
-for (const w of ['HOUSES', 'MONEY']) send(red1, { t: 'tap', word: w })
-await settle()
-send(red1, { t: 'submit' }); send(red2, { t: 'submit' }); await settle()
-check('under-filled guess costs no mistake', red1.latestView().you.mistakes === 1, `mistakes=${red1.latestView().you.mistakes}`)
-check(
-  'under-filled guess does not wipe the team selection',
-  Object.keys(red1.latestView().you.selection).length === 2,
-  JSON.stringify(red1.latestView().you.selection),
-)
-check('under-filled guess resets confirms', red1.latestView().you.confirms.length === 0)
-send(red1, { t: 'clear' }); await settle()
-
-// --- end the round ---
-await post(`/api/rooms/${code}/end`, {}, token); await settle()
-check('phase done after admin end', red1.latestView().phase === 'done')
-check('solution revealed on done', red1.latestView().solution?.length === 4)
-check('result computed on done', red1.latestView().result?.winner !== undefined, JSON.stringify(red1.latestView().result))
-
-// --- changing the puzzle starts a different game, not a half-scored one ---
-await post(`/api/rooms/${code}/puzzle`, { puzzleId: 'acts4-need' }, token); await settle()
-check('changing the puzzle clears progress scored against the old one', red1.latestView().you.solved.length === 0 && red1.latestView().you.mistakes === 0)
-check('changing the puzzle keeps the roster', Object.keys(red1.latestView().you.players).length === 2)
-
-for (const ws of [red1, red2, blue1, sneak, screen, admin]) ws.close()
+for (const ws of [screen, red, blue, admin]) ws.close()
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`)
 process.exit(failures === 0 ? 0 : 1)

@@ -4,430 +4,329 @@ import {
   seededShuffle,
   buildOrder,
   evaluateGuess,
-  isTeamDone,
+  newRoom,
+  startRound,
+  resetRound,
+  finishRound,
+  skipTurn,
+  toggleTap,
+  applyGuess,
+  nextTurn,
   matchResult,
   toRoomView,
   parseClientMsg,
-  isLegalTap,
-  isValidConfirms,
+  isValidTeamCount,
+  isValidLives,
   MAX_WORD_LENGTH,
 } from './game.ts'
-import type { Puzzle, Room, TeamState, ServerMsg } from './types.ts'
+import type { Puzzle, Room } from './types.ts'
 
 const PUZZLE: Puzzle = {
   id: 'test-puzzle',
   title: 'Test Puzzle',
+  kind: 'scripture',
   scripture: 'Acts 4:32-35',
   groups: [
-    { id: 'g0', name: 'ONE IN ___', difficulty: 0, members: ['HEART', 'MIND', 'SOUL', 'SPIRIT'] },
+    { id: 'g0', name: 'ONE ___', difficulty: 0, members: ['HEART', 'MIND', 'SOUL', 'SPIRIT'] },
     { id: 'g1', name: 'SOLD IT', difficulty: 1, members: ['SOLD', 'BROUGHT', 'LAID', 'DISTRIBUTED'] },
     { id: 'g2', name: 'OWNED', difficulty: 2, members: ['LAND', 'HOUSES', 'MONEY', 'POSSESSIONS'] },
-    { id: 'g3', name: '___ GRACE', difficulty: 3, members: ['AMAZING', 'SAVING', 'SAYING', 'PERIOD'] },
+    { id: 'g3', name: '___ GRACE', difficulty: 3, members: ['AMAZING', 'SAVING', 'SAYING', 'GREAT'] },
   ],
 }
+const [G0, G1, G2, G3] = PUZZLE.groups
+const NOW = 1_000
 
-function emptyTeam(): TeamState {
-  return {
-    players: {},
-    selection: {},
-    confirms: [],
-    solved: [],
-    mistakes: 0,
-    pastGuesses: [],
-    finishedAt: null,
-  }
+function playing(teamCount = 2, lives = 4): Room {
+  const room = newRoom('ABCD')
+  room.teamCount = teamCount
+  room.lives = lives
+  startRound(room, PUZZLE)
+  return room
 }
 
-// --- seededShuffle ---
+function guess(room: Room, words: readonly string[]) {
+  room.selection = []
+  for (const w of words) toggleTap(room, PUZZLE, w)
+  return applyGuess(room, PUZZLE, NOW)
+}
 
-test('seededShuffle is deterministic for a given seed', () => {
+const WRONG = ['HEART', 'SOLD', 'LAND', 'AMAZING']
+const WRONG2 = ['MIND', 'BROUGHT', 'HOUSES', 'SAVING']
+const WRONG3 = ['SOUL', 'LAID', 'MONEY', 'SAYING']
+const ONE_AWAY = ['HEART', 'MIND', 'SOUL', 'LAND']
+
+// --- shuffle ---
+
+test('seededShuffle is a deterministic permutation that does not mutate input', () => {
   const words = PUZZLE.groups.flatMap(g => g.members)
-  const a = seededShuffle(words, 'room-1:test-puzzle')
-  const b = seededShuffle(words, 'room-1:test-puzzle')
-  assert.deepEqual(a, b)
+  const copy = [...words]
+  const a = seededShuffle(words, 'seed')
+  assert.deepEqual(a, seededShuffle(words, 'seed'))
+  assert.notDeepEqual(a, seededShuffle(words, 'other-seed'))
+  assert.deepEqual([...a].sort(), [...words].sort())
+  assert.deepEqual(words, copy)
 })
 
-test('seededShuffle differs across seeds', () => {
-  const words = PUZZLE.groups.flatMap(g => g.members)
-  const a = seededShuffle(words, 'seed-a')
-  const b = seededShuffle(words, 'seed-b')
-  assert.notDeepEqual(a, b)
-})
-
-test('seededShuffle is a true permutation (same multiset as input)', () => {
-  const words = PUZZLE.groups.flatMap(g => g.members)
-  const shuffled = seededShuffle(words, 'perm-seed')
-  assert.deepEqual([...shuffled].sort(), [...words].sort())
-})
-
-test('seededShuffle does not mutate its input', () => {
-  const input = ['a', 'b', 'c', 'd']
-  const original = [...input]
-  seededShuffle(input, 'seed')
-  assert.deepEqual(input, original)
-})
-
-// --- buildOrder ---
-
-test('buildOrder gives the same order for both teams in a room', () => {
-  const a = buildOrder(PUZZLE, 'ROOM1')
-  const b = buildOrder(PUZZLE, 'ROOM1')
-  assert.deepEqual(a, b)
-})
-
-test('buildOrder differs for a different room code', () => {
-  const a = buildOrder(PUZZLE, 'ROOM1')
-  const b = buildOrder(PUZZLE, 'ROOM2')
-  assert.notDeepEqual(a, b)
+test('buildOrder contains all 16 words', () => {
+  assert.equal(new Set(buildOrder(PUZZLE, 'ROOM')).size, 16)
 })
 
 // --- evaluateGuess ---
 
-test('evaluateGuess: correct guess returns the right group', () => {
-  const outcome = evaluateGuess(PUZZLE, ['HEART', 'MIND', 'SOUL', 'SPIRIT'], [], [])
+test('evaluateGuess: correct, one away, wrong', () => {
+  assert.deepEqual(evaluateGuess(PUZZLE, [...G0.members], [], []), { kind: 'correct', group: G0 })
+  assert.equal(evaluateGuess(PUZZLE, ONE_AWAY, [], []).kind, 'oneAway')
+  assert.equal(evaluateGuess(PUZZLE, WRONG, [], []).kind, 'wrong')
+})
+
+test('evaluateGuess: repeat in any order, but only after validation', () => {
+  assert.equal(evaluateGuess(PUZZLE, [...WRONG].reverse(), [], [WRONG]).kind, 'repeat')
+  assert.equal(evaluateGuess(PUZZLE, ['HEART'], [], [['HEART']]).kind, 'invalid')
+})
+
+test('evaluateGuess rejects bad input', () => {
+  assert.equal(evaluateGuess(PUZZLE, ['HEART', 'MIND', 'SOUL'], [], []).kind, 'invalid')
+  assert.equal(evaluateGuess(PUZZLE, ['HEART', 'HEART', 'SOUL', 'MIND'], [], []).kind, 'invalid')
+  assert.equal(evaluateGuess(PUZZLE, ['HEART', 'MIND', 'SOUL', 'NOPE'], [], []).kind, 'invalid')
+  assert.equal(evaluateGuess(PUZZLE, [...G0.members], ['g0'], []).kind, 'invalid')
+})
+
+// --- round lifecycle ---
+
+test('startRound gives the first turn to the first team, then rotates across rounds', () => {
+  const room = newRoom('ABCD')
+  room.teamCount = 3
+  startRound(room, PUZZLE)
+  assert.equal(room.turn, 'red')
+  assert.equal(room.phase, 'playing')
+  finishRound(room)
+  startRound(room, PUZZLE)
+  assert.equal(room.turn, 'blue')
+  finishRound(room)
+  startRound(room, PUZZLE)
+  assert.equal(room.turn, 'orange')
+  finishRound(room)
+  startRound(room, PUZZLE)
+  assert.equal(room.turn, 'red')
+})
+
+test('a correct guess scores by difficulty and passes the turn', () => {
+  const room = playing()
+  const outcome = guess(room, G3.members)
   assert.equal(outcome.kind, 'correct')
-  if (outcome.kind === 'correct') {
-    assert.equal(outcome.group.id, 'g0')
-  }
+  assert.deepEqual(room.solved, [{ groupId: 'g3', by: 'red', points: 4, at: NOW }])
+  assert.equal(room.turn, 'blue')
+  assert.deepEqual(room.selection, [])
 })
 
-test('evaluateGuess: 3-of-4 match is oneAway, 2-of-4 match is wrong', () => {
-  const oneAway = evaluateGuess(PUZZLE, ['HEART', 'MIND', 'SOUL', 'SOLD'], [], [])
-  assert.equal(oneAway.kind, 'oneAway')
-
-  const wrong = evaluateGuess(PUZZLE, ['HEART', 'MIND', 'SOLD', 'BROUGHT'], [], [])
-  assert.equal(wrong.kind, 'wrong')
+test('a wrong or one-away guess costs a life and passes the turn', () => {
+  const room = playing()
+  assert.equal(guess(room, ONE_AWAY).kind, 'oneAway')
+  assert.equal(room.mistakes.red, 1)
+  assert.equal(room.turn, 'blue')
+  assert.equal(guess(room, WRONG).kind, 'wrong')
+  assert.equal(room.mistakes.blue, 1)
+  assert.equal(room.turn, 'red')
 })
 
-test('evaluateGuess: repeat guess is detected regardless of word order, distinct from wrong', () => {
-  const pastGuesses = [['HEART', 'MIND', 'SOLD', 'BROUGHT']]
-
-  const first = evaluateGuess(PUZZLE, ['HEART', 'MIND', 'SOLD', 'BROUGHT'], [], [])
-  assert.equal(first.kind, 'wrong')
-
-  const repeat = evaluateGuess(PUZZLE, ['BROUGHT', 'SOLD', 'MIND', 'HEART'], [], pastGuesses)
-  assert.equal(repeat.kind, 'repeat')
+test('a repeat is free and keeps the turn, even if another team made it', () => {
+  const room = playing()
+  guess(room, WRONG)                  // red misses
+  assert.equal(room.turn, 'blue')
+  assert.equal(guess(room, [...WRONG].reverse()).kind, 'repeat')
+  assert.equal(room.turn, 'blue')
+  assert.equal(room.mistakes.blue, 0)
 })
 
-test('evaluateGuess: invalid - wrong word count', () => {
-  const outcome = evaluateGuess(PUZZLE, ['HEART', 'MIND', 'SOUL'], [], [])
-  assert.equal(outcome.kind, 'invalid')
+test('an invalid submit changes nothing, not even the selection', () => {
+  const room = playing()
+  toggleTap(room, PUZZLE, 'HEART')
+  toggleTap(room, PUZZLE, 'MIND')
+  assert.equal(applyGuess(room, PUZZLE, NOW).kind, 'invalid')
+  assert.deepEqual(room.selection, ['HEART', 'MIND'])
+  assert.equal(room.turn, 'red')
+  assert.equal(room.mistakes.red, 0)
 })
 
-test('evaluateGuess: invalid - unknown word', () => {
-  const outcome = evaluateGuess(PUZZLE, ['HEART', 'MIND', 'SOUL', 'BANANA'], [], [])
-  assert.equal(outcome.kind, 'invalid')
+test('the last group reveals itself for no points and ends the round', () => {
+  const room = playing()
+  guess(room, G0.members)   // red +1
+  guess(room, G1.members)   // blue +2
+  guess(room, G2.members)   // red +3, G3 is forced
+  assert.equal(room.phase, 'done')
+  assert.deepEqual(room.solved.at(-1), { groupId: 'g3', by: null, points: 0, at: NOW })
+  assert.equal(room.turn, null)
+  assert.deepEqual(room.totals, { red: 4, blue: 2, orange: 0, teal: 0 })
+  assert.deepEqual(matchResult(room), { winner: 'red', reason: 'most points' })
 })
 
-test('evaluateGuess: invalid - duplicate word', () => {
-  const outcome = evaluateGuess(PUZZLE, ['HEART', 'HEART', 'MIND', 'SOUL'], [], [])
-  assert.equal(outcome.kind, 'invalid')
+test('a team out of lives is skipped; the survivor plays on alone', () => {
+  const room = playing(2, 1)
+  guess(room, WRONG)          // red out
+  assert.equal(room.turn, 'blue')
+  guess(room, G0.members)     // blue scores, red is out, so blue again
+  assert.equal(room.turn, 'blue')
+  assert.equal(nextTurn(room, 'blue'), 'blue')
 })
 
-test('evaluateGuess: invalid - word already solved', () => {
-  const outcome = evaluateGuess(PUZZLE, ['HEART', 'MIND', 'SOUL', 'SPIRIT'], ['g0'], [])
-  assert.equal(outcome.kind, 'invalid')
+test('the round ends when every team is out', () => {
+  const room = playing(2, 1)
+  guess(room, WRONG)
+  guess(room, WRONG2)
+  assert.equal(room.phase, 'done')
+  assert.equal(room.turn, null)
 })
 
-// --- isTeamDone ---
-
-test('isTeamDone: true at 4 groups solved', () => {
-  const team = emptyTeam()
-  team.solved = [
-    { groupId: 'g0', at: 1 },
-    { groupId: 'g1', at: 2 },
-    { groupId: 'g2', at: 3 },
-    { groupId: 'g3', at: 4 },
-  ]
-  assert.equal(isTeamDone(team), true)
+test('three teams rotate in order', () => {
+  const room = playing(3)
+  guess(room, WRONG)
+  assert.equal(room.turn, 'blue')
+  guess(room, WRONG2)
+  assert.equal(room.turn, 'orange')
+  guess(room, WRONG3)
+  assert.equal(room.turn, 'red')
 })
 
-test('isTeamDone: true at 4 mistakes', () => {
-  const team = emptyTeam()
-  team.mistakes = 4
-  assert.equal(isTeamDone(team), true)
+test('skipTurn passes without a penalty', () => {
+  const room = playing()
+  toggleTap(room, PUZZLE, 'HEART')
+  skipTurn(room)
+  assert.equal(room.turn, 'blue')
+  assert.equal(room.mistakes.red, 0)
+  assert.deepEqual(room.selection, [])
 })
 
-test('isTeamDone: false mid-game', () => {
-  const team = emptyTeam()
-  team.mistakes = 2
-  team.solved = [{ groupId: 'g0', at: 1 }]
-  assert.equal(isTeamDone(team), false)
+test('finishRound adds points to totals exactly once', () => {
+  const room = playing()
+  guess(room, G3.members)
+  finishRound(room)
+  finishRound(room)
+  assert.equal(room.totals.red, 4)
 })
 
-// --- matchResult ---
-
-test('matchResult: clear win by groups solved', () => {
-  const red = emptyTeam()
-  red.solved = [{ groupId: 'g0', at: 1 }, { groupId: 'g1', at: 2 }, { groupId: 'g2', at: 3 }]
-  const blue = emptyTeam()
-  blue.solved = [{ groupId: 'g0', at: 1 }]
-  const result = matchResult({ red, blue })
-  assert.equal(result.winner, 'red')
-  assert.equal(result.reason, 'more groups solved')
+test('resetRound wipes progress but keeps totals and players', () => {
+  const room = playing()
+  room.players.p1 = { name: 'Ada', team: 'red', connected: true }
+  guess(room, G3.members)
+  finishRound(room)
+  resetRound(room, PUZZLE)
+  assert.equal(room.phase, 'lobby')
+  assert.deepEqual(room.solved, [])
+  assert.equal(room.totals.red, 4)
+  assert.equal(room.players.p1.team, 'red')
 })
 
-test('matchResult: tie on solved broken by mistakes', () => {
-  const red = emptyTeam()
-  red.solved = [{ groupId: 'g0', at: 1 }, { groupId: 'g1', at: 2 }]
-  red.mistakes = 1
-  const blue = emptyTeam()
-  blue.solved = [{ groupId: 'g0', at: 1 }, { groupId: 'g1', at: 2 }]
-  blue.mistakes = 3
-  const result = matchResult({ red, blue })
-  assert.equal(result.winner, 'red')
-  assert.equal(result.reason, 'fewer mistakes')
+test('matchResult: equal points fall to fewer mistakes, then a tie', () => {
+  const room = playing()
+  guess(room, G1.members)          // red +2
+  guess(room, WRONG)               // blue miss
+  guess(room, WRONG2)              // red miss
+  guess(room, G1.members.slice(0)) // blue: invalid, G1 is solved
+  assert.equal(room.turn, 'blue')
+  guess(room, G2.members)          // blue +3
+  assert.deepEqual(matchResult(room), { winner: 'blue', reason: 'most points' })
+
+  const tie = playing()
+  assert.deepEqual(matchResult(tie), { winner: 'tie', reason: 'level on points and mistakes' })
+  guess(tie, WRONG)
+  assert.deepEqual(matchResult(tie), { winner: 'blue', reason: 'fewer mistakes' })
 })
 
-test('matchResult: tie on solved and mistakes broken by finishedAt', () => {
-  const red = emptyTeam()
-  red.solved = [{ groupId: 'g0', at: 1 }]
-  red.mistakes = 1
-  red.finishedAt = 1000
-  const blue = emptyTeam()
-  blue.solved = [{ groupId: 'g0', at: 1 }]
-  blue.mistakes = 1
-  blue.finishedAt = 2000
-  const result = matchResult({ red, blue })
-  assert.equal(result.winner, 'red')
-  assert.equal(result.reason, 'earlier finish')
+// --- taps ---
+
+test('toggleTap caps at four, toggles off, and ignores solved or unknown words', () => {
+  const room = playing()
+  for (const w of ['HEART', 'SOLD', 'LAND', 'AMAZING', 'MIND']) toggleTap(room, PUZZLE, w)
+  assert.deepEqual(room.selection, ['HEART', 'SOLD', 'LAND', 'AMAZING'])
+  toggleTap(room, PUZZLE, 'SOLD')
+  assert.deepEqual(room.selection, ['HEART', 'LAND', 'AMAZING'])
+  assert.equal(toggleTap(room, PUZZLE, 'NOPE'), false)
+  assert.equal(toggleTap(room, PUZZLE, 'X'.repeat(MAX_WORD_LENGTH + 1)), false)
+  room.selection = []
+  guess(room, G0.members)
+  assert.equal(toggleTap(room, PUZZLE, 'HEART'), false)
 })
 
-test('matchResult: genuine tie', () => {
-  const red = emptyTeam()
-  red.solved = [{ groupId: 'g0', at: 1 }]
-  red.mistakes = 1
-  red.finishedAt = 1000
-  const blue = emptyTeam()
-  blue.solved = [{ groupId: 'g0', at: 1 }]
-  blue.mistakes = 1
-  blue.finishedAt = 1000
-  const result = matchResult({ red, blue })
-  assert.equal(result.winner, 'tie')
+test('toggleTap does nothing outside a running round', () => {
+  const room = newRoom('ABCD')
+  resetRound(room, PUZZLE)
+  assert.equal(toggleTap(room, PUZZLE, 'HEART'), false)
 })
 
-// --- toRoomView: the leak tests ---
+// --- redaction ---
 
-test('toRoomView (player): no unsolved group name/members leak, no opponent selection/pastGuesses leak', () => {
-  const red = emptyTeam()
-  red.players = { p1: { name: 'Red One', connected: true } }
-  red.solved = [{ groupId: 'g0', at: 1000 }]
-  red.mistakes = 1
-  red.pastGuesses = [['HEART', 'MIND', 'SOLD', 'BROUGHT']]
-
-  const blue = emptyTeam()
-  blue.players = { blueSecretPlayer: { name: 'Blue Secret', connected: true } }
-  blue.selection = { BROUGHT: ['blueSecretPlayer'] }
-  blue.confirms = ['blueSecretPlayer']
-  blue.mistakes = 2
-  blue.pastGuesses = [['SOLD', 'LAND', 'AMAZING', 'HEART']]
-
-  const room: Room = {
-    code: 'ROOM1',
-    phase: 'playing',
-    puzzleId: PUZZLE.id,
-    confirmsRequired: 2,
-    startedAt: 1000,
-    order: buildOrder(PUZZLE, 'ROOM1'),
-    teams: { red, blue },
-  }
-
-  const view = toRoomView(room, PUZZLE, { kind: 'player', team: 'red' }, 9000)
-  const json = JSON.stringify(view)
-
-  assert.equal(view.viewer, 'player')
-
-  // Unsolved group names (g1, g2, g3) must never appear.
-  assert.equal(json.includes('SOLD IT'), false)
-  assert.equal(json.includes('OWNED'), false)
-  assert.equal(json.includes('___ GRACE'), false)
-
-  // The solved group (g0) is fine to reveal in full - a control, so the
-  // absence checks above aren't just vacuously true for any output.
-  assert.equal(json.includes('ONE IN ___'), true)
-
-  // Unsolved groups' members must never appear bundled together as a group
-  // (their individual words legitimately appear as flat, ungrouped tiles -
-  // checked separately below).
-  assert.equal(json.includes(JSON.stringify(PUZZLE.groups[1].members)), false)
-  assert.equal(json.includes(JSON.stringify(PUZZLE.groups[2].members)), false)
-  assert.equal(json.includes(JSON.stringify(PUZZLE.groups[3].members)), false)
-
-  // Board tiles are flat strings with no group association.
-  if (view.viewer === 'player') {
-    for (const tile of view.you.board) {
-      assert.equal(typeof tile, 'string')
+test('only the admin view carries the answer key', () => {
+  const room = playing()
+  room.players.p1 = { name: 'Ada', team: 'red', connected: true }
+  const player = JSON.stringify(toRoomView(room, PUZZLE, { kind: 'player', playerId: 'p1' }, NOW))
+  const screen = JSON.stringify(toRoomView(room, PUZZLE, { kind: 'screen' }, NOW))
+  for (const text of [player, screen]) {
+    for (const secret of ['ONE ___', 'SOLD IT', 'OWNED', '___ GRACE', '"members"', '"g0"']) {
+      assert.ok(!text.includes(secret), `leaked ${secret}`)
     }
   }
-
-  // The opponent's identity, selection, and past guesses never appear.
-  assert.equal(json.includes('blueSecretPlayer'), false)
-  assert.equal(json.includes('Blue Secret'), false)
-  assert.equal(json.includes(JSON.stringify(blue.pastGuesses[0])), false)
-
-  // Structural check: the opponent field carries only the four summary numbers.
-  if (view.viewer === 'player') {
-    assert.deepEqual(Object.keys(view.opponent).sort(), ['finishedAt', 'mistakes', 'playerCount', 'solvedCount'])
-  }
+  assert.equal(toRoomView(room, PUZZLE, { kind: 'admin' }, NOW).answerKey?.length, 4)
 })
 
-test('toRoomView: phase done reveals the full solution to a player', () => {
-  const red = emptyTeam()
-  red.solved = [{ groupId: 'g0', at: 1 }]
-  red.mistakes = 4
-  red.finishedAt = 2000
-  const blue = emptyTeam()
-  blue.solved = [
-    { groupId: 'g0', at: 1 },
-    { groupId: 'g1', at: 2 },
-    { groupId: 'g2', at: 3 },
-    { groupId: 'g3', at: 4 },
-  ]
-  blue.finishedAt = 1500
-
-  const room: Room = {
-    code: 'ROOM1',
-    phase: 'done',
-    puzzleId: PUZZLE.id,
-    confirmsRequired: 2,
-    startedAt: 1000,
-    order: buildOrder(PUZZLE, 'ROOM1'),
-    teams: { red, blue },
-  }
-
-  const view = toRoomView(room, PUZZLE, { kind: 'player', team: 'red' }, 9000)
-  assert.notEqual(view.solution, null)
-  const json = JSON.stringify(view)
-  assert.equal(json.includes('SOLD IT'), true)
-  assert.equal(json.includes('OWNED'), true)
-  assert.equal(json.includes('___ GRACE'), true)
+test('a solved group is revealed to everyone, the rest are not', () => {
+  const room = playing()
+  guess(room, G0.members)
+  const view = toRoomView(room, PUZZLE, { kind: 'screen' }, NOW)
+  assert.deepEqual(view.solved.map(g => [g.id, g.by, g.points]), [['g0', 'red', 1]])
+  assert.equal(view.board.length, 12)
+  assert.ok(!JSON.stringify(view).includes('SOLD IT'))
+  assert.deepEqual(view.leftover, [])
 })
 
-test('toRoomView (spectator): sees both teams boards in full, still no unsolved answers', () => {
-  const red = emptyTeam()
-  const blue = emptyTeam()
-  const room: Room = {
-    code: 'ROOM1',
-    phase: 'playing',
-    puzzleId: PUZZLE.id,
-    confirmsRequired: 2,
-    startedAt: 1000,
-    order: buildOrder(PUZZLE, 'ROOM1'),
-    teams: { red, blue },
-  }
-  const view = toRoomView(room, PUZZLE, { kind: 'spectator' }, 9000)
-  assert.equal(view.viewer, 'spectator')
-  if (view.viewer === 'spectator') {
-    assert.equal(view.red.board.length, 16)
-    assert.equal(view.blue.board.length, 16)
-  }
+test('the lobby shows no words; done shows the leftover groups', () => {
+  const room = newRoom('ABCD')
+  resetRound(room, PUZZLE)
+  assert.deepEqual(toRoomView(room, PUZZLE, { kind: 'screen' }, NOW).board, [])
+  startRound(room, PUZZLE)
+  guess(room, G0.members)
+  finishRound(room)
+  const view = toRoomView(room, PUZZLE, { kind: 'screen' }, NOW)
+  assert.deepEqual(view.leftover.map(g => g.id), ['g1', 'g2', 'g3'])
+  assert.equal(view.result?.winner, 'red')
 })
 
-test('toRoomView (player, no team yet): no team data leaks before joining a side', () => {
-  const red = emptyTeam()
-  const blue = emptyTeam()
-  const room: Room = {
-    code: 'ROOM1',
-    phase: 'lobby',
-    puzzleId: null,
-    confirmsRequired: 2,
-    startedAt: null,
-    order: [],
-    teams: { red, blue },
-  }
-  const view = toRoomView(room, null, { kind: 'player', team: null }, 9000)
-  assert.equal(view.viewer, 'unassigned')
-  assert.equal('you' in view, false)
-  assert.equal('opponent' in view, false)
-  assert.equal('red' in view, false)
-  assert.equal('blue' in view, false)
+test('player view: canAct only for the team on turn; no player ids on the wire', () => {
+  const room = playing()
+  room.players['secret-id-1'] = { name: 'Ada', team: 'red', connected: true }
+  room.players['secret-id-2'] = { name: 'Bo', team: 'blue', connected: true }
+  const red = toRoomView(room, PUZZLE, { kind: 'player', playerId: 'secret-id-1' }, NOW)
+  const blue = toRoomView(room, PUZZLE, { kind: 'player', playerId: 'secret-id-2' }, NOW)
+  assert.deepEqual(red.you, { team: 'red', canAct: true })
+  assert.deepEqual(blue.you, { team: 'blue', canAct: false })
+  assert.ok(!JSON.stringify(red).includes('secret-id'))
+  assert.equal(red.teams[0].players[0].name, 'Ada')
 })
 
-// --- parseClientMsg ---
-
-test('parseClientMsg: accepts valid messages', () => {
-  assert.deepEqual(parseClientMsg(JSON.stringify({ t: 'tap', word: 'HEART' })), { t: 'tap', word: 'HEART' })
-  assert.deepEqual(parseClientMsg(JSON.stringify({ t: 'clear' })), { t: 'clear' })
-  assert.deepEqual(parseClientMsg(JSON.stringify({ t: 'shuffle' })), { t: 'shuffle' })
-  assert.deepEqual(parseClientMsg(JSON.stringify({ t: 'submit' })), { t: 'submit' })
+test('team totals exclude the current round until it is scored, and never double count', () => {
+  const room = playing()
+  guess(room, G3.members)
+  assert.equal(toRoomView(room, PUZZLE, { kind: 'screen' }, NOW).teams[0].total, 0)
+  finishRound(room)
+  const done = toRoomView(room, PUZZLE, { kind: 'screen' }, NOW).teams[0]
+  assert.equal(done.total + done.points, 4)
 })
 
-test('parseClientMsg: rejects malformed input without throwing', () => {
-  assert.equal(parseClientMsg('not json {'), null)
-  assert.equal(parseClientMsg('[1,2,3]'), null)
-  assert.equal(parseClientMsg('null'), null)
-  assert.equal(parseClientMsg(JSON.stringify({ t: 'nonsense' })), null)
-  assert.equal(parseClientMsg(JSON.stringify({ t: 'tap', word: 5 })), null)
-  assert.equal(parseClientMsg(JSON.stringify({ t: 'clear', extra: true })), null)
+// --- wire parsing and config ---
+
+test('parseClientMsg accepts exactly the protocol', () => {
+  assert.deepEqual(parseClientMsg('{"t":"tap","word":"HEART"}'), { t: 'tap', word: 'HEART' })
+  assert.deepEqual(parseClientMsg('{"t":"join","team":"teal"}'), { t: 'join', team: 'teal' })
+  assert.deepEqual(parseClientMsg('{"t":"submit"}'), { t: 'submit' })
+  assert.equal(parseClientMsg('{"t":"join","team":"green"}'), null)
+  assert.equal(parseClientMsg('{"t":"submit","extra":1}'), null)
+  assert.equal(parseClientMsg(`{"t":"tap","word":"${'X'.repeat(MAX_WORD_LENGTH + 1)}"}`), null)
+  assert.equal(parseClientMsg('not json'), null)
+  assert.equal(parseClientMsg('[]'), null)
 })
 
-// --- R1 regression tests ---
-
-function playingRoom(red: TeamState, blue: TeamState, phase: Room['phase'] = 'playing'): Room {
-  return {
-    code: 'ROOM1',
-    phase,
-    puzzleId: PUZZLE.id,
-    confirmsRequired: 2,
-    startedAt: 1000,
-    order: buildOrder(PUZZLE, 'ROOM1'),
-    teams: { red, blue },
-  }
-}
-
-test('opponentResult broadcast carries no answer; yourResult keeps the group', () => {
-  const group = PUZZLE.groups[1]
-
-  const broadcast: ServerMsg = { t: 'opponentResult', team: 'red', outcome: { solved: true } }
-  const json = JSON.stringify(broadcast)
-  assert.equal(json.includes(group.name), false)
-  assert.equal(json.includes(group.id), false)
-  for (const word of group.members) assert.equal(json.includes(word), false)
-
-  // Control: the acting team's own message is meant to carry the answer.
-  const private_: ServerMsg = { t: 'yourResult', outcome: { kind: 'correct', group } }
-  assert.equal(JSON.stringify(private_).includes(group.name), true)
-})
-
-test('RoomView.result is null until done, then matches matchResult', () => {
-  const red = emptyTeam()
-  const blue = emptyTeam()
-  red.solved = [{ groupId: 'g0', at: 1 }]
-  blue.mistakes = 4
-
-  const playing = toRoomView(playingRoom(red, blue), PUZZLE, { kind: 'player', team: 'red' }, 9000)
-  assert.equal(playing.result, null)
-
-  const done = toRoomView(playingRoom(red, blue, 'done'), PUZZLE, { kind: 'player', team: 'red' }, 9000)
-  assert.deepEqual(done.result, matchResult({ red, blue }))
-  assert.equal(done.result?.winner, 'red')
-})
-
-test('RoomView carries the server clock rather than a client one', () => {
-  const view = toRoomView(playingRoom(emptyTeam(), emptyTeam()), PUZZLE, { kind: 'player', team: 'red' }, 424242)
-  assert.equal(view.serverNow, 424242)
-})
-
-test('isLegalTap: only words on that team live board', () => {
-  const red = emptyTeam()
-  red.solved = [{ groupId: 'g0', at: 1 }]
-  const room = playingRoom(red, emptyTeam())
-
-  assert.equal(isLegalTap(room, PUZZLE, 'red', 'SOLD'), true)
-  assert.equal(isLegalTap(room, PUZZLE, 'red', 'NOTAWORD'), false)
-  assert.equal(isLegalTap(room, PUZZLE, 'red', 'HEART'), false, 'g0 already solved by red')
-  assert.equal(isLegalTap(room, PUZZLE, 'blue', 'HEART'), true, 'blue has not solved g0')
-  assert.equal(isLegalTap(room, PUZZLE, 'red', 'X'.repeat(MAX_WORD_LENGTH + 1)), false)
-  assert.equal(isLegalTap(room, PUZZLE, 'red', ''), false)
-})
-
-test('parseClientMsg rejects an over-long tap word', () => {
-  assert.equal(parseClientMsg(JSON.stringify({ t: 'tap', word: 'X'.repeat(MAX_WORD_LENGTH + 1) })), null)
-  assert.equal(parseClientMsg(JSON.stringify({ t: 'tap', word: '' })), null)
-  assert.notEqual(parseClientMsg(JSON.stringify({ t: 'tap', word: 'X'.repeat(MAX_WORD_LENGTH) })), null)
-})
-
-test('isValidConfirms accepts 1..4 integers only', () => {
-  for (const n of [1, 2, 3, 4]) assert.equal(isValidConfirms(n), true)
-  for (const n of [0, 5, -1, 2.5, '2', null, undefined, NaN]) assert.equal(isValidConfirms(n), false)
+test('config validators', () => {
+  assert.ok(isValidTeamCount(2) && isValidTeamCount(4))
+  assert.ok(!isValidTeamCount(1) && !isValidTeamCount(5) && !isValidTeamCount(2.5) && !isValidTeamCount('3'))
+  assert.ok(isValidLives(1) && isValidLives(6))
+  assert.ok(!isValidLives(0) && !isValidLives(7))
 })

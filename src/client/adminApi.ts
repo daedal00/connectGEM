@@ -1,19 +1,25 @@
 // Admin credential handling and the authenticated fetch wrapper. No rendering
-// here - Admin.tsx and Screen.tsx both go through this so there is exactly one
-// place that knows where the token lives and what an expired one looks like.
-import type { AdminLoginResponse, CreateRoomResponse, PuzzleListResponse, PuzzleSummary } from '../shared/types.ts'
+// here - Admin.tsx goes through this so there is exactly one place that
+// knows where the token lives and what an expired one looks like.
+import type {
+  AdminLoginResponse,
+  CreateRoomResponse,
+  PuzzleListResponse,
+  PuzzleSummary,
+  SetConfigRequest,
+} from '../shared/types.ts'
 
 const TOKEN_KEY = 'connectgem:adminToken'
 
-// sessionStorage, not localStorage: this credential drives a laptop plugged
-// into a TV in a hall. It should survive an accidental refresh and die with
-// the tab rather than outlive the evening on a shared machine.
+// localStorage, not sessionStorage: the leader now runs the night from a
+// phone, and mobile browsers discard background tabs freely. The token
+// itself expires after 4 hours, so it cannot outlive the evening by much.
 export function readToken(): string | null {
-  return sessionStorage.getItem(TOKEN_KEY)
+  return localStorage.getItem(TOKEN_KEY)
 }
 
 export function clearToken(): void {
-  sessionStorage.removeItem(TOKEN_KEY)
+  localStorage.removeItem(TOKEN_KEY)
 }
 
 export async function login(password: string): Promise<string> {
@@ -24,13 +30,12 @@ export async function login(password: string): Promise<string> {
   })
   if (!res.ok) throw new Error('Wrong password.')
   const { token } = (await res.json()) as AdminLoginResponse
-  sessionStorage.setItem(TOKEN_KEY, token)
+  localStorage.setItem(TOKEN_KEY, token)
   return token
 }
 
-// The token expires after 4 hours, which is longer than a youth night but not
-// longer than a laptop left open. Funnelling every admin call through here
-// means a 401 clears the token in one place and the UI falls back to login.
+// Funnelling every admin call through here means a 401 clears the token in
+// one place and the UI falls back to login.
 async function adminFetch<T>(path: string, token: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -65,7 +70,7 @@ export async function createRoom(token: string): Promise<string> {
   return code
 }
 
-export type RoomAction = 'start' | 'reset' | 'end'
+export type RoomAction = 'start' | 'reset' | 'end' | 'skip' | 'zero'
 
 export const roomAction = (token: string, code: string, action: RoomAction) =>
   adminPost(`/api/rooms/${encodeURIComponent(code)}/${action}`, token)
@@ -73,5 +78,5 @@ export const roomAction = (token: string, code: string, action: RoomAction) =>
 export const setPuzzle = (token: string, code: string, puzzleId: string) =>
   adminPost(`/api/rooms/${encodeURIComponent(code)}/puzzle`, token, { puzzleId })
 
-export const setConfirmsRequired = (token: string, code: string, confirmsRequired: number) =>
-  adminPost(`/api/rooms/${encodeURIComponent(code)}/config`, token, { confirmsRequired })
+export const setConfig = (token: string, code: string, config: SetConfigRequest) =>
+  adminPost(`/api/rooms/${encodeURIComponent(code)}/config`, token, config)

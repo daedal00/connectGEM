@@ -1,6 +1,6 @@
 import { createRoot } from 'react-dom/client'
-import { Join, NAME_KEY, readTeam } from './Join.tsx'
-import { Board } from './Board.tsx'
+import { Join, NAME_KEY } from './Join.tsx'
+import { Play } from './Play.tsx'
 import { Admin } from './Admin.tsx'
 import { Screen } from './Screen.tsx'
 import './theme.css'
@@ -10,15 +10,14 @@ function App() {
   const path = location.pathname
   if (path === '/admin' || path === '/admin/') return <Admin />
 
-  const screen = path.match(/^\/screen\/([^/]+)\/?$/)
-  if (screen) return <Screen code={decodeURIComponent(screen[1]).toUpperCase()} />
+  const screen = path.match(/^\/screen(?:\/([^/]+))?\/?$/)
+  if (screen) return <Screen code={screen[1] ? decodeURIComponent(screen[1]).toUpperCase() : null} />
 
   const play = path.match(/^\/play\/([^/]+)\/?$/)
   if (play) {
     const code = decodeURIComponent(play[1]).toUpperCase()
     const name = localStorage.getItem(NAME_KEY)
-    const team = readTeam()
-    if (name && team) return <Board code={code} name={name} team={team} />
+    if (name) return <Play code={code} name={name} />
     return <Join initialCode={code} />
   }
   return <Join initialCode="" />

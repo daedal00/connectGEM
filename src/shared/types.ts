@@ -1,47 +1,55 @@
-// Wire contract and internal Room shape for the Acts 4 Connections game.
-// Pure logic (shuffle, guess evaluation, redaction) lives in game.ts; this
-// file is shapes only, aside from re-use across the worker/client.
+// Wire contract and internal Room shape for the turn-based Connections game.
+// Pure logic (shuffle, guess evaluation, turn order, redaction) lives in
+// game.ts; this file is shapes only.
+//
+// The game: one board on the projector, shared by every team. Teams take
+// turns; on its turn a team's captain picks four words on their phone and
+// submits. Everything on the board is public - the only secret is the
+// answer key for groups nobody has solved yet.
 
 export type Difficulty = 0 | 1 | 2 | 3
-export type TeamId = 'red' | 'blue'
+export type TeamId = 'red' | 'blue' | 'orange' | 'teal'
 export type Phase = 'lobby' | 'playing' | 'done'
 export type Role = 'player' | 'screen' | 'admin'
 export type PlayerId = string
+export type PuzzleKind = 'warmup' | 'scripture'
 
 export type Group = { id: string; name: string; difficulty: Difficulty; members: [string, string, string, string] }
-export type Puzzle = { id: string; title: string; scripture: string; groups: [Group, Group, Group, Group] }
-
-// What the admin puzzle picker renders. Deliberately omits `groups`: the
-// picker must not ship an answer key to a browser before the round starts.
-export type PuzzleSummary = { id: string; title: string; scripture: string }
-
-export type TeamState = {
-  players: Record<PlayerId, { name: string; connected: boolean }>
-  selection: Record<string, PlayerId[]>   // word -> teammates who have tapped it
-  confirms: PlayerId[]                    // distinct members who pressed submit on the CURRENT selection
-  solved: { groupId: string; at: number }[]
-  mistakes: number
-  pastGuesses: string[][]
-  finishedAt: number | null
+export type Puzzle = {
+  id: string
+  title: string
+  kind: PuzzleKind
+  scripture: string | null   // null for warm-up rounds
+  groups: [Group, Group, Group, Group]
 }
+
+// What the admin puzzle picker and every view render. Deliberately omits
+// `groups`: it must not ship an answer key before the round is played.
+export type PuzzleSummary = { id: string; title: string; kind: PuzzleKind; scripture: string | null }
+
+export type Player = { name: string; team: TeamId | null; connected: boolean }
+
+// `by: null` is the last group, which reveals itself for no points once the
+// other three are solved, as in the real game.
+export type SolvedEntry = { groupId: string; by: TeamId | null; points: number; at: number }
 
 export type Room = {   // INTERNAL Durable Object state. Never sent over the wire as-is.
   code: string
   phase: Phase
   puzzleId: string | null
-  confirmsRequired: number  // default 2, admin-settable 1..4
-  startedAt: number | null
-  order: string[]           // the seeded tile order, all 16 words
-  teams: Record<TeamId, TeamState>
+  teamCount: number                  // 2..4, the first N of TEAM_IDS
+  lives: number                      // wrong guesses a team may make before it is out
+  round: number                      // rounds started so far; rotates who goes first
+  order: string[]                    // the shared tile order, all 16 words
+  turn: TeamId | null                // null outside 'playing'
+  selection: string[]                // words picked by the team on turn, at most 4
+  solved: SolvedEntry[]
+  mistakes: Record<TeamId, number>
+  pastGuesses: string[][]            // shared: the board is shared, so is its history
+  totals: Record<TeamId, number>     // points carried across finished rounds
+  players: Record<PlayerId, Player>
 }
 
-// Result of a single guess. Declared here (not game.ts) because ServerMsg
-// below references it - keeps the import direction one-way, game.ts depends
-// on types.ts and never the reverse.
-//
-// The `correct` variant carries a Group, i.e. that group's ANSWER KEY. Both
-// teams race the same puzzle, so this must only ever reach the team that
-// guessed. See ServerMsg.
 export type GuessOutcome =
   | { kind: 'correct'; group: Group }
   | { kind: 'oneAway' }
@@ -49,90 +57,76 @@ export type GuessOutcome =
   | { kind: 'repeat' }
   | { kind: 'invalid'; reason: string }
 
-// The same event with every trace of the answer removed, so it is safe to
-// show the opposing team. Carries no group id, name, or word.
-export type PublicOutcome = { solved: boolean }
-
 export type MatchResult = { winner: TeamId | 'tie'; reason: string }
 
-// --- Wire view: THE SECURITY BOUNDARY ---
-// RoomView is what actually goes over the socket. It is shaped so that
-// leaking an opponent's board or an unsolved answer is a structural
-// impossibility rather than a filtering bug: the 'player' variant has no
-// field that could ever hold the opponent's selection/pastGuesses or an
-// unsolved group's name/members, because those shapes don't appear in it.
+// --- Wire view ---
 
-export type RevealedGroup = Group & { at: number }   // a group this viewer is allowed to see in full
+export type RevealedGroup = Group & { by: TeamId | null; points: number }
 
-export type TeamFullView = {
-  players: Record<PlayerId, { name: string; connected: boolean }>
-  board: string[]                         // remaining words, flat - no group association, solved or not
-  selection: Record<string, PlayerId[]>
-  confirms: PlayerId[]
-  solved: RevealedGroup[]
+export type TeamView = {
+  id: TeamId
+  points: number         // this round
+  total: number          // carried from earlier rounds, not including this one
   mistakes: number
-  pastGuesses: string[][]
-  finishedAt: number | null
+  out: boolean
+  players: { name: string; connected: boolean }[]   // no ids: a playerId is a rejoin credential
 }
 
-export type OpponentView = {
-  solvedCount: number
-  mistakes: number
-  playerCount: number
-  finishedAt: number | null
-}
-
-// Who is asking. `spectator` grants BOTH teams' boards in full, so it must
-// only ever be constructed on a code path that has already verified the admin
-// token. NEVER derive this from a WebSocket query parameter or any other
-// client-supplied value: a player would open /screen/:code on their phone and
-// read the opponent's board. `Role` is intentionally not accepted here - the
-// privileged case has to be written out deliberately.
+// Who is asking. `admin` carries the answer key, so it must only ever be
+// constructed on a code path that has already verified the admin token.
+// NEVER derive it from a WebSocket query parameter alone.
 export type Viewer =
-  | { kind: 'player'; team: TeamId | null }
-  | { kind: 'spectator' }
+  | { kind: 'admin' }
+  | { kind: 'screen' }
+  | { kind: 'player'; playerId: PlayerId }
 
 export type RoomView = {
   code: string
   phase: Phase
-  puzzleId: string | null
-  puzzle: { title: string; scripture: string } | null
-  confirmsRequired: number
-  startedAt: number | null
-  serverNow: number                               // authoritative clock: phone clocks drift and the race has a time tiebreak
-  result: MatchResult | null                      // populated only once phase === 'done'
-  solution: [Group, Group, Group, Group] | null   // populated only once phase === 'done'
-} & (
-  | { viewer: 'player'; team: TeamId; you: TeamFullView; opponent: OpponentView }
-  | { viewer: 'spectator'; red: TeamFullView; blue: TeamFullView }
-  | { viewer: 'unassigned' }   // a player socket that has not joined a team yet
-)
+  puzzle: PuzzleSummary | null
+  lives: number
+  round: number
+  turn: TeamId | null
+  teams: TeamView[]                 // active teams, in turn order
+  board: string[]                   // unsolved words; empty in the lobby so nobody gets a head start
+  selection: string[]
+  solved: RevealedGroup[]
+  leftover: Group[]                 // groups nobody got; populated only once phase === 'done'
+  result: MatchResult | null        // populated only once phase === 'done'
+  serverNow: number
+  viewer: Role
+  you: { team: TeamId | null; canAct: boolean } | null   // player sockets only
+  answerKey: Group[] | null                              // admin sockets only
+}
 
 // --- Wire protocol ---
 
 export type ClientMsg =
+  | { t: 'join'; team: TeamId }
   | { t: 'tap'; word: string }
   | { t: 'clear' }
   | { t: 'shuffle' }
   | { t: 'submit' }
 
+// A guess is public now: every team watches the same board, and a one-away
+// on someone else's turn is information the next team is meant to use.
+export type GuessEvent = {
+  team: TeamId
+  outcome: 'correct' | 'oneAway' | 'wrong' | 'repeat'
+  words: string[]
+  group: RevealedGroup | null   // only for 'correct'
+}
+
 export type ServerMsg =
   | { t: 'state'; room: RoomView }
-  // ONLY to the sockets of the team that guessed. Carries the solved Group,
-  // which is that group's answer key. Sending this room-wide hands the
-  // opposing team a free answer - they are racing the same puzzle.
-  | { t: 'yourResult'; outcome: GuessOutcome }
-  // Safe to broadcast room-wide: no group, no words, just "they got one".
-  | { t: 'opponentResult'; team: TeamId; outcome: PublicOutcome }
+  | { t: 'guess'; event: GuessEvent }
   | { t: 'error'; message: string }
 
 // --- Admin HTTP API ---
-// The worker routes and the admin page are written independently, so these
-// shapes are the contract between them.
 
 export type AdminLoginRequest = { password: string }
 export type AdminLoginResponse = { token: string }
 export type PuzzleListResponse = { puzzles: PuzzleSummary[] }
 export type CreateRoomResponse = { code: string }
 export type SetPuzzleRequest = { puzzleId: string }
-export type SetConfigRequest = { confirmsRequired: number }
+export type SetConfigRequest = { teamCount?: number; lives?: number }

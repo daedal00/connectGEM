@@ -1,3 +1,7 @@
+> **Superseded in part.** This is the original design: two teams racing separate boards on
+> their phones. The game has since become turn-based on one projected board. See README.md
+> for the current rules and flow. The stack, hibernation, and auth notes below still apply.
+
 # Connect GEM - Acts 4 Connections Game
 
 ## Context

@@ -1,34 +1,40 @@
 import type {
   Puzzle,
+  PuzzleSummary,
   Group,
   Room,
-  TeamState,
   TeamId,
   Viewer,
   MatchResult,
   GuessOutcome,
   RoomView,
   RevealedGroup,
-  TeamFullView,
-  OpponentView,
+  TeamView,
   ClientMsg,
 } from './types.ts'
 
+export const TEAM_IDS: readonly TeamId[] = ['red', 'blue', 'orange', 'teal']
 export const GROUP_COUNT = 4
 export const GROUP_SIZE = 4
-export const MAX_MISTAKES = 4
-export const DEFAULT_CONFIRMS = 2
+export const MIN_TEAMS = 2
+export const MAX_TEAMS = TEAM_IDS.length
+export const DEFAULT_TEAMS = 2
+export const MIN_LIVES = 1
+export const MAX_LIVES = 6
+export const DEFAULT_LIVES = 4
 // Puzzle words are single short tokens. The cap is defence in depth against a
-// phone sending a megabyte string that the Durable Object would then persist
-// as a `selection` key.
+// phone sending a megabyte string that the Durable Object would then persist.
 export const MAX_WORD_LENGTH = 40
 export const DIFFICULTY_COLORS = ['#F9DF6D', '#A0C35A', '#B0C4EF', '#BA81C5'] as const
+// Harder groups are worth more, so a team has a reason to go for purple
+// instead of always taking the easy yellow.
+export const DIFFICULTY_POINTS = [1, 2, 3, 4] as const
 
 // --- Seeded shuffle ---
 // The platform has no seedable RNG, so we derive one: djb2 turns the seed
 // string into a 32-bit int, mulberry32 turns that int into a stream of
-// floats. Both are ~5 lines - not cryptographic, just deterministic and
-// unbiased enough to drive a fair Fisher-Yates for both teams' tile order.
+// floats. Not cryptographic, just deterministic and unbiased enough to drive
+// a fair Fisher-Yates.
 
 function hashSeed(seed: string): number {
   let h = 5381
@@ -58,9 +64,13 @@ export function seededShuffle<T>(items: readonly T[], seed: string): T[] {
   return result
 }
 
-export function buildOrder(puzzle: Puzzle, roomCode: string): string[] {
+export function buildOrder(puzzle: Puzzle, seed: string): string[] {
   const words = puzzle.groups.flatMap(group => group.members)
-  return seededShuffle(words, `${roomCode}:${puzzle.id}`)
+  return seededShuffle(words, `${seed}:${puzzle.id}`)
+}
+
+export function summarize({ id, title, kind, scripture }: Puzzle): PuzzleSummary {
+  return { id, title, kind, scripture }
 }
 
 // --- Guess evaluation: the trust boundary for client input ---
@@ -87,7 +97,7 @@ export function evaluateGuess(
   pastGuesses: string[][],
 ): GuessOutcome {
   if (words.length !== GROUP_SIZE) {
-    return { kind: 'invalid', reason: `must submit exactly ${GROUP_SIZE} words` }
+    return { kind: 'invalid', reason: `pick exactly ${GROUP_SIZE} words` }
   }
   if (new Set(words).size !== words.length) {
     return { kind: 'invalid', reason: 'duplicate word in guess' }
@@ -117,127 +127,234 @@ export function evaluateGuess(
   return { kind: 'wrong' }
 }
 
-// --- Round state ---
+// --- Room lifecycle ---
 
-export function isTeamDone(team: TeamState): boolean {
-  return team.solved.length >= GROUP_COUNT || team.mistakes >= MAX_MISTAKES
+function perTeam<T>(value: T): Record<TeamId, T> {
+  return { red: value, blue: value, orange: value, teal: value }
 }
 
-export function isRoundOver(room: Room): boolean {
-  return isTeamDone(room.teams.red) && isTeamDone(room.teams.blue)
+export function newRoom(code: string): Room {
+  return {
+    code,
+    phase: 'lobby',
+    puzzleId: null,
+    teamCount: DEFAULT_TEAMS,
+    lives: DEFAULT_LIVES,
+    round: 0,
+    order: [],
+    turn: null,
+    selection: [],
+    solved: [],
+    mistakes: perTeam(0),
+    pastGuesses: [],
+    totals: perTeam(0),
+    players: {},
+  }
 }
 
-// A tap arrives from a phone. Only a word that is actually on that team's
-// live board may be recorded - otherwise the Durable Object persists
-// attacker-chosen keys in `selection`.
-export function isLegalTap(room: Room, puzzle: Puzzle, team: TeamId, word: string): boolean {
+export function activeTeams(room: Room): TeamId[] {
+  return TEAM_IDS.slice(0, room.teamCount)
+}
+
+export function isOut(room: Room, team: TeamId): boolean {
+  return room.mistakes[team] >= room.lives
+}
+
+// The team after `from` that still has lives, wrapping round to `from`
+// itself last - so a lone surviving team keeps playing on its own.
+export function nextTurn(room: Room, from: TeamId): TeamId | null {
+  const order = activeTeams(room)
+  const start = order.indexOf(from)
+  for (let step = 1; step <= order.length; step++) {
+    const team = order[(start + step) % order.length]
+    if (!isOut(room, team)) return team
+  }
+  return null
+}
+
+// Back to the lobby on `puzzle` (or none) with every trace of the last
+// round's progress gone. Totals from finished rounds are kept.
+export function resetRound(room: Room, puzzle: Puzzle | null): void {
+  room.phase = 'lobby'
+  room.puzzleId = puzzle?.id ?? null
+  room.order = puzzle ? buildOrder(puzzle, `${room.code}:${room.round}`) : []
+  room.turn = null
+  room.selection = []
+  room.solved = []
+  room.mistakes = perTeam(0)
+  room.pastGuesses = []
+}
+
+export function startRound(room: Room, puzzle: Puzzle): void {
+  resetRound(room, puzzle)
+  const teams = activeTeams(room)
+  // Whoever goes first has an edge (they see the fresh board and most
+  // choices). Rotate it so a multi-round night evens out.
+  room.turn = teams[room.round % teams.length]
+  room.round += 1
+  room.phase = 'playing'
+}
+
+export function finishRound(room: Room): void {
+  if (room.phase !== 'playing') return
+  const points = roundPoints(room)
+  for (const team of activeTeams(room)) room.totals[team] += points[team]
+  room.phase = 'done'
+  room.turn = null
+  room.selection = []
+}
+
+export function skipTurn(room: Room): void {
+  if (room.phase !== 'playing' || !room.turn) return
+  room.selection = []
+  room.turn = nextTurn(room, room.turn)
+  if (!room.turn) finishRound(room)
+}
+
+export function roundPoints(room: Room): Record<TeamId, number> {
+  const points = perTeam(0)
+  for (const entry of room.solved) if (entry.by) points[entry.by] += entry.points
+  return points
+}
+
+function unsolvedGroups(room: Room, puzzle: Puzzle): Group[] {
+  const solvedIds = new Set(room.solved.map(s => s.groupId))
+  return puzzle.groups.filter(g => !solvedIds.has(g.id))
+}
+
+// A word the team on turn may select: on the board and not already solved.
+export function isLegalTap(room: Room, puzzle: Puzzle, word: string): boolean {
   if (typeof word !== 'string' || word.length === 0 || word.length > MAX_WORD_LENGTH) return false
   if (!room.order.includes(word)) return false
-  const group = indexWords(puzzle).get(word)
-  if (!group) return false
-  return !room.teams[team].solved.some(s => s.groupId === group.id)
+  return unsolvedGroups(room, puzzle).some(g => g.members.includes(word))
 }
 
-export function isValidConfirms(n: unknown): n is number {
-  return typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= GROUP_SIZE
+export function toggleTap(room: Room, puzzle: Puzzle, word: string): boolean {
+  if (room.phase !== 'playing' || !isLegalTap(room, puzzle, word)) return false
+  if (room.selection.includes(word)) {
+    room.selection = room.selection.filter(w => w !== word)
+    return true
+  }
+  if (room.selection.length >= GROUP_SIZE) return false // full, must deselect first
+  room.selection = [...room.selection, word]
+  return true
 }
 
-export function matchResult(teams: Record<TeamId, TeamState>): MatchResult {
-  const red = teams.red
-  const blue = teams.blue
+// Scores the current selection for the team on turn and moves the game on.
+export function applyGuess(room: Room, puzzle: Puzzle, now: number): GuessOutcome {
+  const team = room.turn
+  if (room.phase !== 'playing' || !team) return { kind: 'invalid', reason: 'round is not running' }
 
-  if (red.solved.length !== blue.solved.length) {
-    return { winner: red.solved.length > blue.solved.length ? 'red' : 'blue', reason: 'more groups solved' }
+  const words = [...room.selection]
+  const outcome = evaluateGuess(puzzle, words, room.solved.map(s => s.groupId), room.pastGuesses)
+  // An invalid guess is not a play: an under-filled submit must not cost the
+  // team its selection, a mistake, or its turn.
+  if (outcome.kind === 'invalid') return outcome
+
+  room.selection = []
+  if (outcome.kind === 'repeat') return outcome   // free, and still your turn
+
+  room.pastGuesses = [...room.pastGuesses, words]
+  if (outcome.kind === 'correct') {
+    room.solved = [
+      ...room.solved,
+      { groupId: outcome.group.id, by: team, points: DIFFICULTY_POINTS[outcome.group.difficulty], at: now },
+    ]
+    // The last four words are forced once three groups are out, so nobody
+    // gets points for them.
+    const left = unsolvedGroups(room, puzzle)
+    if (left.length === 1) room.solved = [...room.solved, { groupId: left[0].id, by: null, points: 0, at: now }]
+    if (room.solved.length >= GROUP_COUNT) {
+      finishRound(room)
+      return outcome
+    }
+  } else {
+    room.mistakes = { ...room.mistakes, [team]: room.mistakes[team] + 1 }
   }
-  if (red.mistakes !== blue.mistakes) {
-    return { winner: red.mistakes < blue.mistakes ? 'red' : 'blue', reason: 'fewer mistakes' }
-  }
-  if (red.finishedAt !== blue.finishedAt) {
-    // A missing finish time cannot be "earlier" than a recorded one.
-    if (red.finishedAt === null) return { winner: 'blue', reason: 'earlier finish' }
-    if (blue.finishedAt === null) return { winner: 'red', reason: 'earlier finish' }
-    return { winner: red.finishedAt < blue.finishedAt ? 'red' : 'blue', reason: 'earlier finish' }
-  }
-  return { winner: 'tie', reason: 'tie' }
+
+  room.turn = nextTurn(room, team)
+  if (!room.turn) finishRound(room)
+  return outcome
+}
+
+export function matchResult(room: Room): MatchResult {
+  const points = roundPoints(room)
+  const ranked = [...activeTeams(room)].sort(
+    (a, b) => points[b] - points[a] || room.mistakes[a] - room.mistakes[b],
+  )
+  const [first, second] = ranked
+  if (points[first] !== points[second]) return { winner: first, reason: 'most points' }
+  if (room.mistakes[first] !== room.mistakes[second]) return { winner: first, reason: 'fewer mistakes' }
+  return { winner: 'tie', reason: 'level on points and mistakes' }
+}
+
+export function isValidTeamCount(n: unknown): n is number {
+  return typeof n === 'number' && Number.isInteger(n) && n >= MIN_TEAMS && n <= MAX_TEAMS
+}
+
+export function isValidLives(n: unknown): n is number {
+  return typeof n === 'number' && Number.isInteger(n) && n >= MIN_LIVES && n <= MAX_LIVES
+}
+
+export function isTeamId(value: unknown): value is TeamId {
+  return typeof value === 'string' && (TEAM_IDS as readonly string[]).includes(value)
 }
 
 // --- Redaction boundary ---
-// A player's RoomView can only ever carry a TeamFullView for their own team
-// and an OpponentView for the other - never a Record<TeamId, TeamFullView>
-// filtered at send time. There is no field the client could reach that would
-// carry the opponent's tiles, selection, or guesses.
+// The board is public, so every viewer gets the same view with two
+// exceptions: `answerKey` (unsolved groups in full) exists only on the admin
+// variant, and `you` only on a player's. Unsolved group names and members
+// reach nobody else until the round is over.
 
-function fullTeamView(room: Room, puzzle: Puzzle | null, team: TeamId): TeamFullView {
-  const state = room.teams[team]
-  const wordIndex = puzzle ? indexWords(puzzle) : null
-  const solvedIds = new Set(state.solved.map(s => s.groupId))
+export function toRoomView(room: Room, puzzle: Puzzle | null, viewer: Viewer, serverNow: number): RoomView {
+  const groupById = new Map(puzzle?.groups.map(g => [g.id, g]) ?? [])
+  const solvedIds = new Set(room.solved.map(s => s.groupId))
+  const solvedWords = new Set(room.solved.flatMap(s => groupById.get(s.groupId)?.members ?? []))
+  const points = roundPoints(room)
+  const done = room.phase === 'done'
 
-  const board = room.order.filter(word => {
-    const group = wordIndex?.get(word)
-    return !group || !solvedIds.has(group.id)
-  })
+  const teams: TeamView[] = activeTeams(room).map(id => ({
+    id,
+    points: points[id],
+    // Totals already include this round once it has been scored.
+    total: room.totals[id] - (done ? points[id] : 0),
+    mistakes: room.mistakes[id],
+    out: isOut(room, id),
+    players: Object.values(room.players)
+      .filter(p => p.team === id)
+      .map(({ name, connected }) => ({ name, connected })),
+  }))
 
-  const solved = state.solved
+  const solved = room.solved
     .map(s => {
-      const group = puzzle?.groups.find(g => g.id === s.groupId)
-      return group ? { ...group, at: s.at } : null
+      const group = groupById.get(s.groupId)
+      return group ? { ...group, by: s.by, points: s.points } : null
     })
     .filter((g): g is RevealedGroup => g !== null)
 
-  return {
-    players: state.players,
-    board,
-    selection: state.selection,
-    confirms: state.confirms,
-    solved,
-    mistakes: state.mistakes,
-    pastGuesses: state.pastGuesses,
-    finishedAt: state.finishedAt,
+  let you: RoomView['you'] = null
+  if (viewer.kind === 'player') {
+    const team = room.players[viewer.playerId]?.team ?? null
+    you = { team, canAct: room.phase === 'playing' && team !== null && team === room.turn }
   }
-}
 
-function toOpponentView(state: TeamState): OpponentView {
   return {
-    solvedCount: state.solved.length,
-    mistakes: state.mistakes,
-    playerCount: Object.keys(state.players).length,
-    finishedAt: state.finishedAt,
-  }
-}
-
-export function toRoomView(room: Room, puzzle: Puzzle | null, viewer: Viewer, serverNow: number): RoomView {
-  const base = {
     code: room.code,
     phase: room.phase,
-    puzzleId: room.puzzleId,
-    puzzle: puzzle ? { title: puzzle.title, scripture: puzzle.scripture } : null,
-    confirmsRequired: room.confirmsRequired,
-    startedAt: room.startedAt,
+    puzzle: puzzle ? summarize(puzzle) : null,
+    lives: room.lives,
+    round: room.round,
+    turn: room.turn,
+    teams,
+    board: room.phase === 'lobby' ? [] : room.order.filter(word => !solvedWords.has(word)),
+    selection: room.selection,
+    solved,
+    leftover: done && puzzle ? puzzle.groups.filter(g => !solvedIds.has(g.id)) : [],
+    result: done ? matchResult(room) : null,
     serverNow,
-    result: room.phase === 'done' ? matchResult(room.teams) : null,
-    solution: room.phase === 'done' && puzzle ? puzzle.groups : null,
-  }
-
-  if (viewer.kind === 'spectator') {
-    return {
-      ...base,
-      viewer: 'spectator',
-      red: fullTeamView(room, puzzle, 'red'),
-      blue: fullTeamView(room, puzzle, 'blue'),
-    }
-  }
-
-  if (viewer.team === null) {
-    return { ...base, viewer: 'unassigned' }
-  }
-
-  const opponentId: TeamId = viewer.team === 'red' ? 'blue' : 'red'
-  return {
-    ...base,
-    viewer: 'player',
-    team: viewer.team,
-    you: fullTeamView(room, puzzle, viewer.team),
-    opponent: toOpponentView(room.teams[opponentId]),
+    viewer: viewer.kind,
+    you,
+    answerKey: viewer.kind === 'admin' && puzzle ? puzzle.groups : null,
   }
 }
 
@@ -264,6 +381,8 @@ export function parseClientMsg(raw: string): ClientMsg | null {
       return keys.length === 2 && typeof obj.word === 'string' && obj.word.length > 0 && obj.word.length <= MAX_WORD_LENGTH
         ? { t: 'tap', word: obj.word }
         : null
+    case 'join':
+      return keys.length === 2 && isTeamId(obj.team) ? { t: 'join', team: obj.team } : null
     default:
       return null
   }
