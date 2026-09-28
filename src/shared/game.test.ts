@@ -331,6 +331,15 @@ test('team totals exclude the current round until it is scored, and never double
   assert.equal(done.total + done.points, 4)
 })
 
+test('zeroing totals on the results screen never shows a negative total', () => {
+  const room = playing()
+  guess(room, G3.members)
+  finishRound(room)
+  room.totals = { red: 0, blue: 0, orange: 0, teal: 0 }
+  const view = toRoomView(room, PUZZLE, { kind: 'screen' }, NOW)
+  assert.ok(view.teams.every(t => t.total === 0))
+})
+
 // --- wire parsing and config ---
 
 test('parseClientMsg accepts exactly the protocol', () => {

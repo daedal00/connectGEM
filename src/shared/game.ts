@@ -319,8 +319,9 @@ export function toRoomView(room: Room, puzzle: Puzzle | null, viewer: Viewer, se
   const teams: TeamView[] = activeTeams(room).map(id => ({
     id,
     points: points[id],
-    // Totals already include this round once it has been scored.
-    total: room.totals[id] - (done ? points[id] : 0),
+    // Totals already include this round once it has been scored. Zeroing
+    // totals on the results screen leaves them below this round's points.
+    total: Math.max(0, room.totals[id] - (done ? points[id] : 0)),
     mistakes: room.mistakes[id],
     out: isOut(room, id),
     players: Object.values(room.players)

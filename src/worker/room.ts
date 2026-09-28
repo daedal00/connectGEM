@@ -237,6 +237,15 @@ export class RoomDO extends DurableObject {
         this.safeSend(ws, { t: "error", message: "teams are locked until the round ends" });
         return;
       }
+      // One captain per team. A dead phone's stand-in may take over once the
+      // old socket has dropped; otherwise the leader plays for the team.
+      const captain = Object.entries(room.players).find(
+        ([id, p]) => id !== attachment.playerId && p.team === msg.team && p.connected,
+      );
+      if (captain) {
+        this.safeSend(ws, { t: "error", message: `${captain[1].name} is already captain of that team` });
+        return;
+      }
       player.team = msg.team;
       await this.commit();
       return;
