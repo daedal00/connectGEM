@@ -216,6 +216,26 @@ test('resetRound wipes progress but keeps totals and players', () => {
   assert.equal(room.players.p1.team, 'red')
 })
 
+test('a reset mid-round replays it: same first team, same board, no phantom round', () => {
+  const room = playing()
+  const order = [...room.order]
+  guess(room, WRONG)
+  resetRound(room, PUZZLE)
+  assert.equal(room.round, 0)
+  startRound(room, PUZZLE)
+  assert.equal(room.turn, 'red')
+  assert.deepEqual(room.order, order)
+  assert.equal(toRoomView(room, PUZZLE, { kind: 'screen' }, NOW).round, 1)
+})
+
+test('a reset after a finished round keeps the rotation moving', () => {
+  const room = playing()
+  finishRound(room)
+  resetRound(room, PUZZLE)
+  startRound(room, PUZZLE)
+  assert.equal(room.turn, 'blue')
+})
+
 test('matchResult: equal points fall to fewer mistakes, then a tie', () => {
   const room = playing()
   guess(room, G1.members)          // red +2

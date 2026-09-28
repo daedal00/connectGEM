@@ -140,7 +140,10 @@ export class RoomDO extends DurableObject {
 
   async setConfig(config: { teamCount?: number; lives?: number }): Promise<ActionResult> {
     if (!this.room) return notFound("room not found");
-    if (this.room.phase === "playing") return badRequest("end the round before changing settings");
+    // Lobby only: a finished round's winner and OUT markers are recomputed
+    // from teamCount and lives on every render, so changing them on the
+    // results screen would rewrite the result everyone just watched.
+    if (this.room.phase !== "lobby") return badRequest("pick the next puzzle before changing teams or lives");
     if (config.teamCount !== undefined) {
       if (!isValidTeamCount(config.teamCount)) return badRequest("teamCount must be an integer 2..4");
       this.room.teamCount = config.teamCount;

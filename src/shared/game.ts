@@ -175,6 +175,9 @@ export function nextTurn(room: Room, from: TeamId): TeamId | null {
 // Back to the lobby on `puzzle` (or none) with every trace of the last
 // round's progress gone. Totals from finished rounds are kept.
 export function resetRound(room: Room, puzzle: Puzzle | null): void {
+  // A reset mid-round is a do-over, not a new round: hand back the round
+  // startRound counted, so the same team goes first on the same board.
+  if (room.phase === 'playing') room.round -= 1
   room.phase = 'lobby'
   room.puzzleId = puzzle?.id ?? null
   room.order = puzzle ? buildOrder(puzzle, `${room.code}:${room.round}`) : []

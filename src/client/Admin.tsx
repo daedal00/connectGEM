@@ -240,12 +240,13 @@ function AdminRoom({
             </button>
           )}
 
+          {phase === 'done' && <p className="hint left">Pick the next puzzle to change teams or lives.</p>}
           <Stepper
             label="Teams"
             value={view.teams.length}
             min={MIN_TEAMS}
             max={MAX_TEAMS}
-            disabled={busy}
+            disabled={busy || phase !== 'lobby'}
             onPick={n => run(() => api.setConfig(token, code, { teamCount: n }))}
           />
           <Stepper
@@ -253,7 +254,7 @@ function AdminRoom({
             value={view.lives}
             min={MIN_LIVES}
             max={MAX_LIVES}
-            disabled={busy}
+            disabled={busy || phase !== 'lobby'}
             onPick={n => run(() => api.setConfig(token, code, { lives: n }))}
           />
 
