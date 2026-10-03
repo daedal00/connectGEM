@@ -4,10 +4,10 @@ import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useRoom } from './useRoom.ts'
 import * as api from './adminApi.ts'
-import { Band, teamLabel } from './Board.tsx'
+import { Band, TurnClock, teamLabel, useTurnClock } from './Board.tsx'
 import { CodeForm } from './Join.tsx'
 import { PlayControls, Scores } from './Play.tsx'
-import { MAX_LIVES, MAX_TEAMS, MIN_LIVES, MIN_TEAMS } from '../shared/game.ts'
+import { MAX_LIVES, MAX_TEAMS, MIN_LIVES, MIN_TEAMS, TURN_SECONDS_OPTIONS } from '../shared/game.ts'
 import type { PuzzleSummary } from '../shared/types.ts'
 
 const ROOM_KEY = 'connectgem:adminRoom'
@@ -52,11 +52,13 @@ function Login({ onToken }: { onToken: (token: string) => void }) {
   )
 }
 
-function Stepper({ label, value, min, max, disabled, onPick }: {
+const range = (min: number, max: number) => Array.from({ length: max - min + 1 }, (_, i) => min + i)
+
+function Stepper({ label, value, options, format = String, disabled, onPick }: {
   label: string
   value: number
-  min: number
-  max: number
+  options: readonly number[]
+  format?: (n: number) => string
   disabled: boolean
   onPick: (n: number) => void
 }) {
@@ -64,7 +66,7 @@ function Stepper({ label, value, min, max, disabled, onPick }: {
     <div className="field">
       <span>{label}</span>
       <div className="stepper">
-        {Array.from({ length: max - min + 1 }, (_, i) => min + i).map(n => (
+        {options.map(n => (
           <button
             key={n}
             type="button"
@@ -73,7 +75,7 @@ function Stepper({ label, value, min, max, disabled, onPick }: {
             disabled={disabled}
             onClick={() => onPick(n)}
           >
-            {n}
+            {format(n)}
           </button>
         ))}
       </div>
@@ -99,6 +101,7 @@ function AdminRoom({
   const [problem, setProblem] = useState('')
   const [busy, setBusy] = useState(false)
   const [showKey, setShowKey] = useState(false)
+  const seconds = useTurnClock(view)
 
   // Every admin call funnels through here so an expired token drops back to
   // the login form from one place.
@@ -146,6 +149,17 @@ function AdminRoom({
   const warmups = puzzles.filter(p => p.kind === 'warmup')
   const scripture = puzzles.filter(p => p.kind === 'scripture')
   const solvedIds = new Set(view.solved.map(g => g.id))
+  // Unlike teams and lives, the timer can change mid-round (from the next turn).
+  const timerStepper = (
+    <Stepper
+      label={playing ? 'Seconds per turn (from the next turn)' : 'Seconds per turn'}
+      value={view.turnSeconds}
+      options={TURN_SECONDS_OPTIONS}
+      format={n => (n === 0 ? 'Off' : String(n))}
+      disabled={busy}
+      onPick={n => run(() => api.setConfig(token, code, { turnSeconds: n }))}
+    />
+  )
 
   return (
     <main className="wrap admin">
@@ -163,8 +177,10 @@ function AdminRoom({
         <section className="panel">
           <div className={`turn-strip ${view.turn ?? ''} mine`}>
             {view.turn ? `${teamLabel(view.turn)}'S TURN - you can tap for them` : ''}
+            <TurnClock seconds={seconds} />
           </div>
           <PlayControls room={room} view={view} enabled />
+          {timerStepper}
           <div className="controls">
             <button className="action" disabled={busy} onClick={() => run(() => api.roomAction(token, code, 'skip'))}>
               Skip turn
@@ -244,19 +260,18 @@ function AdminRoom({
           <Stepper
             label="Teams"
             value={view.teams.length}
-            min={MIN_TEAMS}
-            max={MAX_TEAMS}
+            options={range(MIN_TEAMS, MAX_TEAMS)}
             disabled={busy || phase !== 'lobby'}
             onPick={n => run(() => api.setConfig(token, code, { teamCount: n }))}
           />
           <Stepper
             label="Lives per team"
             value={view.lives}
-            min={MIN_LIVES}
-            max={MAX_LIVES}
+            options={range(MIN_LIVES, MAX_LIVES)}
             disabled={busy || phase !== 'lobby'}
             onPick={n => run(() => api.setConfig(token, code, { lives: n }))}
           />
+          {timerStepper}
 
           <button
             className="action primary wide"

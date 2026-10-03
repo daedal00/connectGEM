@@ -65,6 +65,16 @@ h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color
   font-weight: 800; font-size: 0.95rem; background: var(--tile); color: var(--ink);
 }
 .turn-strip.mine { background: var(--team, var(--ink)); color: #fff; }
+.turn-strip .clock { margin-left: 10px; }
+
+/* Turn countdown. Goes red and pulses in the last ten seconds. */
+@keyframes tick { 50% { transform: scale(1.12); } }
+.clock {
+  display: inline-block; font-variant-numeric: tabular-nums; font-weight: 900;
+  background: rgba(0, 0, 0, 0.18); color: inherit; border-radius: 999px; padding: 2px 10px;
+}
+.clock.low { background: var(--bad); color: #fff; box-shadow: 0 0 0 3px #fff; animation: tick 1s ease-in-out infinite; }
+.turn-banner .clock { font-size: 5vh; padding: 0.2vh 1.6vh; margin-left: 1.5vw; align-self: center; }
 
 /* --- solved bands --- */
 .band {
@@ -310,6 +320,6 @@ button.action:focus-visible { outline: 3px solid var(--blue); outline-offset: 2p
 .flash-overlay.bad { border-color: var(--bad); color: var(--bad); }
 
 @media (prefers-reduced-motion: reduce) {
-  .grid.shake, .flash-overlay { animation: none; }
+  .grid.shake, .flash-overlay, .clock.low { animation: none; }
   .team-card, .tile { transition: none; }
 }

@@ -3,7 +3,7 @@
 // read-only on the server too.
 import { useState } from 'react'
 import { useRoom } from './useRoom.ts'
-import { Band, Hearts, Tiles, describeGuess, teamLabel, useGuessFlash } from './Board.tsx'
+import { Band, Hearts, Tiles, TurnClock, describeGuess, teamLabel, useGuessFlash, useTurnClock } from './Board.tsx'
 import { CodeForm } from './Join.tsx'
 import type { RoomView, TeamView } from '../shared/types.ts'
 
@@ -56,6 +56,7 @@ function TeamCard({ team, view }: { team: TeamView; view: RoomView }) {
 function Projector({ code }: { code: string }) {
   const { status, view, guess } = useRoom(code, { role: 'screen', name: 'Screen' })
   const flash = useGuessFlash(guess)
+  const seconds = useTurnClock(view)
 
   if (!view) {
     return (
@@ -99,6 +100,7 @@ function Projector({ code }: { code: string }) {
           <p className="rules">
             Teams take turns. Find four words that share something. Harder groups score more
             (yellow 1, green 2, blue 3, purple 4). A wrong guess costs a heart and passes the turn.
+            {view.turnSeconds > 0 && ` Each turn has ${view.turnSeconds} seconds; run out and the turn passes.`}
           </p>
         </section>
       ) : (
@@ -108,6 +110,7 @@ function Projector({ code }: { code: string }) {
               <div className={`turn-banner ${turnTeam.id}`} aria-live="polite">
                 {teamLabel(turnTeam.id)} TEAM'S TURN
                 <span className="turn-sub">{view.selection.length}/4 picked</span>
+                <TurnClock seconds={seconds} />
               </div>
             )}
             {view.phase === 'done' && view.result && (

@@ -6,12 +6,15 @@ import {
   startRound,
   finishRound,
   skipTurn,
+  timeOutTurn,
   toggleTap,
   applyGuess,
   seededShuffle,
   activeTeams,
   isValidTeamCount,
   isValidLives,
+  isValidTurnSeconds,
+  DEFAULT_TURN_SECONDS,
   toRoomView,
   parseClientMsg,
 } from "../shared/game.ts";
@@ -66,6 +69,11 @@ export class RoomDO extends DurableObject {
       // Rooms created before the turn-based redesign have a different shape;
       // treat them as gone rather than crash every handler on them.
       this.room = stored && "teamCount" in stored ? stored : null;
+      // Rooms from before the turn timer: same shape otherwise, so fill it in.
+      if (this.room && this.room.turnSeconds === undefined) {
+        this.room.turnSeconds = DEFAULT_TURN_SECONDS;
+        this.room.turnEndsAt = null;
+      }
     });
   }
 
@@ -73,6 +81,34 @@ export class RoomDO extends DurableObject {
   private async commit(): Promise<void> {
     if (!this.room) return;
     await this.ctx.storage.put("room", this.room);
+    await this.syncAlarm();
+    this.broadcastState();
+  }
+
+  // The turn clock lives on the server, so a captain's locked phone or a
+  // closed laptop lid can't stop it. One alarm per room, always set to the
+  // current turn's deadline (or cleared when there is none).
+  private async syncAlarm(): Promise<void> {
+    const deadline = this.room?.turnEndsAt ?? null;
+    if (deadline === null) {
+      await this.ctx.storage.deleteAlarm();
+    } else if ((await this.ctx.storage.getAlarm()) !== deadline) {
+      await this.ctx.storage.setAlarm(deadline);
+    }
+  }
+
+  async alarm(): Promise<void> {
+    const room = this.room;
+    if (!room) return;
+    const team = timeOutTurn(room, Date.now());
+    if (!team) {
+      // Fired early, or the turn already moved on: re-aim at whatever is current.
+      await this.syncAlarm();
+      return;
+    }
+    await this.ctx.storage.put("room", room);
+    await this.syncAlarm();
+    this.broadcast({ t: "guess", event: { team, outcome: "timeout", words: [], group: null } });
     this.broadcastState();
   }
 
@@ -103,7 +139,7 @@ export class RoomDO extends DurableObject {
     const puzzle = findPuzzle(this.room.puzzleId);
     if (!puzzle) return badRequest("no puzzle assigned");
     if (this.room.phase === "playing") return badRequest("a round is already running");
-    startRound(this.room, puzzle);
+    startRound(this.room, puzzle, Date.now());
     await this.commit();
     return ok();
   }
@@ -126,7 +162,7 @@ export class RoomDO extends DurableObject {
   async skipRoom(): Promise<ActionResult> {
     if (!this.room) return notFound("room not found");
     if (this.room.phase !== "playing") return badRequest("no round is running");
-    skipTurn(this.room);
+    skipTurn(this.room, Date.now());
     await this.commit();
     return ok();
   }
@@ -138,12 +174,24 @@ export class RoomDO extends DurableObject {
     return ok();
   }
 
-  async setConfig(config: { teamCount?: number; lives?: number }): Promise<ActionResult> {
+  async setConfig(config: { teamCount?: number; lives?: number; turnSeconds?: number }): Promise<ActionResult> {
     if (!this.room) return notFound("room not found");
-    // Lobby only: a finished round's winner and OUT markers are recomputed
-    // from teamCount and lives on every render, so changing them on the
-    // results screen would rewrite the result everyone just watched.
-    if (this.room.phase !== "lobby") return badRequest("pick the next puzzle before changing teams or lives");
+    // Teams and lives are lobby only: a finished round's winner and OUT
+    // markers are recomputed from them on every render, so changing them on
+    // the results screen would rewrite the result everyone just watched.
+    const changesTeamsOrLives = config.teamCount !== undefined || config.lives !== undefined;
+    if (changesTeamsOrLives && this.room.phase !== "lobby") {
+      return badRequest("pick the next puzzle before changing teams or lives");
+    }
+    // The timer may change any time - it never touches the score, and a
+    // leader who sees a room struggling should be able to give more time.
+    // It takes effect from the next turn; the running clock is left alone.
+    if (config.turnSeconds !== undefined) {
+      if (!isValidTurnSeconds(config.turnSeconds)) return badRequest("turnSeconds must be one of 0, 30, 45, 60, 90, 120");
+      this.room.turnSeconds = config.turnSeconds;
+      // Switching the timer off mid-turn should stop the clock on screen now.
+      if (config.turnSeconds === 0) this.room.turnEndsAt = null;
+    }
     if (config.teamCount !== undefined) {
       if (!isValidTeamCount(config.teamCount)) return badRequest("teamCount must be an integer 2..4");
       this.room.teamCount = config.teamCount;
@@ -296,6 +344,7 @@ export class RoomDO extends DurableObject {
         }
         if (outcome.kind === "repeat") event.words = [];
         await this.ctx.storage.put("room", room);
+        await this.syncAlarm();
         // The event first, then the state it produced, so a screen can show
         // "ONE AWAY" over the board the guess was made on.
         this.broadcast({ t: "guess", event });
