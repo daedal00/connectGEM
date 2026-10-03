@@ -3,7 +3,7 @@
 // on the team's own turn - the server enforces that too.
 import { useEffect, useState } from 'react'
 import { useRoom } from './useRoom.ts'
-import { Band, Hearts, Tiles, describeGuess, teamLabel, useGuessFlash } from './Board.tsx'
+import { Band, Hearts, Tiles, TurnClock, describeGuess, teamLabel, useGuessFlash, useTurnClock } from './Board.tsx'
 import { GROUP_SIZE } from '../shared/game.ts'
 import type { RoomView, TeamId } from '../shared/types.ts'
 import type { RoomHandle } from './useRoom.ts'
@@ -82,6 +82,7 @@ export function PlayControls({ room, view, enabled }: { room: RoomHandle; view: 
 export function Play({ code, name }: { code: string; name: string }) {
   const room = useRoom(code, { role: 'player', name })
   const { status, view } = room
+  const seconds = useTurnClock(view)
 
   if (!view || !view.you) {
     return (
@@ -135,6 +136,7 @@ export function Play({ code, name }: { code: string; name: string }) {
             : turnTeam
               ? `${teamLabel(turnTeam)} is up. Watch the big screen.`
               : ''}
+          <TurnClock seconds={seconds} />
         </div>
       )}
 

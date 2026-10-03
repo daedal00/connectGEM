@@ -1,9 +1,9 @@
 // Pieces shared by the big screen, the captain's phone and the leader's
 // phone. All three render the same board; they differ in who may tap it.
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { DIFFICULTY_COLORS } from '../shared/game.ts'
-import type { Group, RevealedGroup, TeamId } from '../shared/types.ts'
+import type { Group, RevealedGroup, RoomView, TeamId } from '../shared/types.ts'
 import type { GuessNotice } from './useRoom.ts'
 
 export const teamLabel = (team: TeamId) => team.toUpperCase()
@@ -75,7 +75,42 @@ export function describeGuess(g: GuessNotice): { text: string; tone: 'good' | 'b
       return { text: `${team}: not a group`, tone: 'bad' }
     case 'repeat':
       return { text: 'Already guessed - try again', tone: 'meh' }
+    case 'timeout':
+      return { text: `${team}: time's up!`, tone: 'meh' }
   }
+}
+
+// Whole seconds left on the current turn, or null when there is no clock.
+// The deadline is in server time; `serverNow` on each state lets us correct
+// for a phone or laptop whose clock is off by more than a second or two.
+export function useTurnClock(view: RoomView | null): number | null {
+  const offset = useRef(0)
+  const [now, setNow] = useState(() => Date.now())
+  const deadline = view?.phase === 'playing' ? view.turnEndsAt : null
+
+  useEffect(() => {
+    if (view) offset.current = view.serverNow - Date.now()
+  }, [view])
+
+  useEffect(() => {
+    if (deadline === null) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 250)
+    return () => clearInterval(timer)
+  }, [deadline])
+
+  if (deadline === null) return null
+  return Math.max(0, Math.ceil((deadline - (now + offset.current)) / 1000))
+}
+
+export function TurnClock({ seconds }: { seconds: number | null }) {
+  if (seconds === null) return null
+  const label = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+  return (
+    <span className={`clock${seconds <= 10 ? ' low' : ''}`} aria-label={`${seconds} seconds left`}>
+      {label}
+    </span>
+  )
 }
 
 // Holds the latest guess on screen for a moment, then clears it.

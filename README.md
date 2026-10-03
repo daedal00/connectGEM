@@ -13,6 +13,10 @@ teaches the game, then Acts 4:29-37 rounds build on the passage.
   turn passes. Harder groups are worth more, so going for purple is a real choice.
 - **Wrong or one away:** the team loses a heart and the turn passes. The next team hears the
   "one away" too, and is meant to use it.
+- **Turn timer:** each turn has a time limit (60 seconds by default), counted down on the
+  big screen and the captain's phone. If it runs out the turn passes, with **no heart
+  lost**. The leader can set it to 30, 45, 60, 90 or 120 seconds, or off, at any time; a
+  change mid-round applies from the next turn.
 - Once three groups are solved, the last four words reveal themselves for no points.
 - A team with no hearts left sits out. The round ends when the board is cleared or every
   team is out, or when the leader ends it.
@@ -26,8 +30,8 @@ teaches the game, then Acts 4:29-37 rounds build on the passage.
    the screen shows only what every team can already see.
 3. **Captains:** one per team goes to `/play` (it's on the screen), enters the code and
    their name, and picks a team.
-4. **Leader phone:** pick a puzzle (the warm-ups are listed first), set the number of teams
-   and lives, and **Start**. Between rounds, **Next puzzle** goes down the list.
+4. **Leader phone:** pick a puzzle (the warm-ups are listed first), set the number of teams,
+   lives and seconds per turn, and **Start**. Between rounds, **Next puzzle** goes down the list.
 
 From the leader phone you can also **Skip turn**, **End round**, **Reset round**, or
 **Zero totals**. While a round runs you can tap in a guess for whichever team is up, for a

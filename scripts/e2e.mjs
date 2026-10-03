@@ -189,6 +189,27 @@ check('zero on the results screen ok', (await post(`/api/rooms/${code}/zero`, {}
 await settle()
 check('no negative totals after zeroing a finished round', screen.view().teams.every(t => t.total === 0))
 
+// --- turn timer: the Durable Object alarm passes the turn on its own ---
+check('timer rejects an odd value', (await post(`/api/rooms/${code}/config`, { turnSeconds: 7 }, token)).status === 400)
+check('timer can change on the results screen', (await post(`/api/rooms/${code}/config`, { turnSeconds: 30 }, token)).ok)
+check('restart with a 30s timer ok', (await post(`/api/rooms/${code}/puzzle`, { puzzleId: 'acts4-unity' }, token)).ok
+  && (await post(`/api/rooms/${code}/start`, {}, token)).ok)
+await settle()
+const timed = screen.view()
+const timedTeam = timed.turn
+check('the turn has a 30s deadline', timed.turnEndsAt - timed.serverNow > 28_000 && timed.turnEndsAt - timed.serverNow <= 30_000)
+const guessesBefore = screen.guesses().length
+console.log('      waiting out the 30s turn...')
+await new Promise(r => setTimeout(r, timed.turnEndsAt - timed.serverNow + 2_000))
+const timeout = screen.guesses().slice(guessesBefore).find(g => g.outcome === 'timeout')
+check('time-out is announced', timeout?.team === timedTeam)
+check('time-out passes the turn', screen.view().turn !== timedTeam && screen.view().turn !== null)
+check('time-out costs no heart', screen.view().teams.find(t => t.id === timedTeam).mistakes === 0)
+check('the next team gets a fresh clock', screen.view().turnEndsAt - screen.view().serverNow > 25_000)
+check('timer off mid-round ok', (await post(`/api/rooms/${code}/config`, { turnSeconds: 0 }, token)).ok)
+await settle()
+check('timer off stops the clock now', screen.view().turnEndsAt === null)
+
 for (const ws of [screen, red, blue, admin]) ws.close()
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`)
 process.exit(failures === 0 ? 0 : 1)

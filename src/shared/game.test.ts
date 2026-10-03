@@ -9,6 +9,7 @@ import {
   resetRound,
   finishRound,
   skipTurn,
+  timeOutTurn,
   toggleTap,
   applyGuess,
   nextTurn,
@@ -17,6 +18,8 @@ import {
   parseClientMsg,
   isValidTeamCount,
   isValidLives,
+  isValidTurnSeconds,
+  DEFAULT_TURN_SECONDS,
   MAX_WORD_LENGTH,
 } from './game.ts'
 import type { Puzzle, Room } from './types.ts'
@@ -358,4 +361,71 @@ test('config validators', () => {
   assert.ok(!isValidTeamCount(1) && !isValidTeamCount(5) && !isValidTeamCount(2.5) && !isValidTeamCount('3'))
   assert.ok(isValidLives(1) && isValidLives(6))
   assert.ok(!isValidLives(0) && !isValidLives(7))
+})
+
+// --- turn clock ---
+
+test('every hand-over of the turn restarts the clock', () => {
+  const room = newRoom('ABCD')
+  startRound(room, PUZZLE, NOW)
+  assert.equal(room.turnEndsAt, NOW + DEFAULT_TURN_SECONDS * 1000)
+  guess(room, WRONG)   // applyGuess at NOW
+  assert.equal(room.turn, 'blue')
+  assert.equal(room.turnEndsAt, NOW + DEFAULT_TURN_SECONDS * 1000)
+  skipTurn(room, NOW + 5_000)
+  assert.equal(room.turnEndsAt, NOW + 5_000 + DEFAULT_TURN_SECONDS * 1000)
+})
+
+test('a repeat guess keeps the turn and the running clock', () => {
+  const room = newRoom('ABCD')
+  startRound(room, PUZZLE, NOW)
+  guess(room, WRONG)
+  guess(room, WRONG3)  // blue
+  const deadline = room.turnEndsAt
+  assert.equal(guess(room, WRONG).kind, 'repeat')
+  assert.equal(room.turn, 'red')
+  assert.equal(room.turnEndsAt, deadline)
+})
+
+test('timeOutTurn passes the turn with no heart lost, and only once the time is up', () => {
+  const room = newRoom('ABCD')
+  startRound(room, PUZZLE, NOW)
+  toggleTap(room, PUZZLE, 'HEART')
+  const deadline = room.turnEndsAt!
+  assert.equal(timeOutTurn(room, deadline - 1), null)
+  assert.equal(room.turn, 'red')
+  assert.equal(timeOutTurn(room, deadline), 'red')
+  assert.equal(room.turn, 'blue')
+  assert.equal(room.mistakes.red, 0)
+  assert.deepEqual(room.selection, [])
+  assert.equal(room.turnEndsAt, deadline + DEFAULT_TURN_SECONDS * 1000)
+})
+
+test('no clock when the timer is off or the round is over', () => {
+  const room = newRoom('ABCD')
+  room.turnSeconds = 0
+  startRound(room, PUZZLE, NOW)
+  assert.equal(room.turnEndsAt, null)
+  assert.equal(timeOutTurn(room, NOW + 10 * 60_000), null)
+  assert.equal(room.turn, 'red')
+
+  room.turnSeconds = 30
+  skipTurn(room, NOW)
+  assert.equal(room.turnEndsAt, NOW + 30_000)
+  finishRound(room)
+  assert.equal(room.turnEndsAt, null)
+  assert.equal(timeOutTurn(room, NOW + 60_000), null)
+})
+
+test('toRoomView carries the clock to every viewer', () => {
+  const room = newRoom('ABCD')
+  startRound(room, PUZZLE, NOW)
+  const view = toRoomView(room, PUZZLE, { kind: 'screen' }, NOW)
+  assert.equal(view.turnSeconds, DEFAULT_TURN_SECONDS)
+  assert.equal(view.turnEndsAt, room.turnEndsAt)
+})
+
+test('isValidTurnSeconds accepts only the offered settings', () => {
+  for (const ok of [0, 30, 45, 60, 90, 120]) assert.ok(isValidTurnSeconds(ok))
+  for (const bad of [-1, 10, 61, 600, '60', null, 60.5]) assert.ok(!isValidTurnSeconds(bad))
 })

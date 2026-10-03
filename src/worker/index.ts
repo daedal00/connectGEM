@@ -9,7 +9,7 @@ import type {
   SetConfigRequest,
   Role,
 } from "../shared/types.ts";
-import { isValidLives, isValidTeamCount } from "../shared/game.ts";
+import { isValidLives, isValidTeamCount, isValidTurnSeconds } from "../shared/game.ts";
 import { puzzleSummaries } from "../puzzles.ts";
 
 // ADMIN_SECRET is a plain-text var/secret (see .dev.vars.example), not a
@@ -178,10 +178,13 @@ async function handleRoomAction(request: Request, env: Env, code: string, action
     case "config": {
       const body = await readJson<SetConfigRequest>(request);
       if (!body || typeof body !== "object") return badRequest("config body required");
-      const { teamCount, lives } = body;
+      const { teamCount, lives, turnSeconds } = body;
       if (teamCount !== undefined && !isValidTeamCount(teamCount)) return badRequest("teamCount must be an integer 2..4");
       if (lives !== undefined && !isValidLives(lives)) return badRequest("lives must be an integer 1..6");
-      return actionResponse(await stub.setConfig({ teamCount, lives }));
+      if (turnSeconds !== undefined && !isValidTurnSeconds(turnSeconds)) {
+        return badRequest("turnSeconds must be one of 0, 30, 45, 60, 90, 120");
+      }
+      return actionResponse(await stub.setConfig({ teamCount, lives, turnSeconds }));
     }
     default:
       return new Response("not found", { status: 404 });

@@ -22,6 +22,11 @@ export const DEFAULT_TEAMS = 2
 export const MIN_LIVES = 1
 export const MAX_LIVES = 6
 export const DEFAULT_LIVES = 4
+// Seconds per turn. A team huddles, agrees, and the captain taps four words:
+// a minute is enough for that without letting one stuck team stall the room.
+// 0 turns the timer off.
+export const TURN_SECONDS_OPTIONS = [0, 30, 45, 60, 90, 120] as const
+export const DEFAULT_TURN_SECONDS = 60
 // Puzzle words are single short tokens. The cap is defence in depth against a
 // phone sending a megabyte string that the Durable Object would then persist.
 export const MAX_WORD_LENGTH = 40
@@ -140,6 +145,8 @@ export function newRoom(code: string): Room {
     puzzleId: null,
     teamCount: DEFAULT_TEAMS,
     lives: DEFAULT_LIVES,
+    turnSeconds: DEFAULT_TURN_SECONDS,
+    turnEndsAt: null,
     round: 0,
     order: [],
     turn: null,
@@ -182,13 +189,20 @@ export function resetRound(room: Room, puzzle: Puzzle | null): void {
   room.puzzleId = puzzle?.id ?? null
   room.order = puzzle ? buildOrder(puzzle, `${room.code}:${room.round}`) : []
   room.turn = null
+  room.turnEndsAt = null
   room.selection = []
   room.solved = []
   room.mistakes = perTeam(0)
   room.pastGuesses = []
 }
 
-export function startRound(room: Room, puzzle: Puzzle): void {
+// Every hand-over of the turn restarts the clock, including a lone
+// surviving team taking another go.
+function startClock(room: Room, now: number): void {
+  room.turnEndsAt = room.phase === 'playing' && room.turn && room.turnSeconds > 0 ? now + room.turnSeconds * 1000 : null
+}
+
+export function startRound(room: Room, puzzle: Puzzle, now = Date.now()): void {
   resetRound(room, puzzle)
   const teams = activeTeams(room)
   // Whoever goes first has an edge (they see the fresh board and most
@@ -196,6 +210,7 @@ export function startRound(room: Room, puzzle: Puzzle): void {
   room.turn = teams[room.round % teams.length]
   room.round += 1
   room.phase = 'playing'
+  startClock(room, now)
 }
 
 export function finishRound(room: Room): void {
@@ -204,14 +219,26 @@ export function finishRound(room: Room): void {
   for (const team of activeTeams(room)) room.totals[team] += points[team]
   room.phase = 'done'
   room.turn = null
+  room.turnEndsAt = null
   room.selection = []
 }
 
-export function skipTurn(room: Room): void {
+export function skipTurn(room: Room, now = Date.now()): void {
   if (room.phase !== 'playing' || !room.turn) return
   room.selection = []
   room.turn = nextTurn(room, room.turn)
   if (!room.turn) finishRound(room)
+  else startClock(room, now)
+}
+
+// The clock ran out: the turn passes like a skip, with no heart lost - a
+// team that ran out of time already lost its go. Returns the team that timed
+// out, or null if the turn is not actually over yet.
+export function timeOutTurn(room: Room, now: number): TeamId | null {
+  const team = room.turn
+  if (room.phase !== 'playing' || !team || room.turnEndsAt === null || now < room.turnEndsAt) return null
+  skipTurn(room, now)
+  return team
 }
 
 export function roundPoints(room: Room): Record<TeamId, number> {
@@ -277,6 +304,7 @@ export function applyGuess(room: Room, puzzle: Puzzle, now: number): GuessOutcom
 
   room.turn = nextTurn(room, team)
   if (!room.turn) finishRound(room)
+  else startClock(room, now)
   return outcome
 }
 
@@ -297,6 +325,10 @@ export function isValidTeamCount(n: unknown): n is number {
 
 export function isValidLives(n: unknown): n is number {
   return typeof n === 'number' && Number.isInteger(n) && n >= MIN_LIVES && n <= MAX_LIVES
+}
+
+export function isValidTurnSeconds(n: unknown): n is number {
+  return typeof n === 'number' && (TURN_SECONDS_OPTIONS as readonly number[]).includes(n)
 }
 
 export function isTeamId(value: unknown): value is TeamId {
@@ -349,6 +381,8 @@ export function toRoomView(room: Room, puzzle: Puzzle | null, viewer: Viewer, se
     lives: room.lives,
     round: room.round,
     turn: room.turn,
+    turnSeconds: room.turnSeconds,
+    turnEndsAt: room.turnEndsAt,
     teams,
     board: room.phase === 'lobby' ? [] : room.order.filter(word => !solvedWords.has(word)),
     selection: room.selection,

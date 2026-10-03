@@ -39,6 +39,8 @@ export type Room = {   // INTERNAL Durable Object state. Never sent over the wir
   puzzleId: string | null
   teamCount: number                  // 2..4, the first N of TEAM_IDS
   lives: number                      // wrong guesses a team may make before it is out
+  turnSeconds: number                // per-turn time limit; 0 means no timer
+  turnEndsAt: number | null          // epoch ms the current turn runs out; null when untimed or not playing
   round: number                      // rounds started so far; rotates who goes first
   order: string[]                    // the shared tile order, all 16 words
   turn: TeamId | null                // null outside 'playing'
@@ -87,6 +89,8 @@ export type RoomView = {
   lives: number
   round: number
   turn: TeamId | null
+  turnSeconds: number
+  turnEndsAt: number | null         // server clock: compare against `serverNow`, not the device clock
   teams: TeamView[]                 // active teams, in turn order
   board: string[]                   // unsolved words; empty in the lobby so nobody gets a head start
   selection: string[]
@@ -112,7 +116,7 @@ export type ClientMsg =
 // on someone else's turn is information the next team is meant to use.
 export type GuessEvent = {
   team: TeamId
-  outcome: 'correct' | 'oneAway' | 'wrong' | 'repeat'
+  outcome: 'correct' | 'oneAway' | 'wrong' | 'repeat' | 'timeout'   // timeout: the clock ran out, turn passed
   words: string[]
   group: RevealedGroup | null   // only for 'correct'
 }
@@ -129,4 +133,4 @@ export type AdminLoginResponse = { token: string }
 export type PuzzleListResponse = { puzzles: PuzzleSummary[] }
 export type CreateRoomResponse = { code: string }
 export type SetPuzzleRequest = { puzzleId: string }
-export type SetConfigRequest = { teamCount?: number; lives?: number }
+export type SetConfigRequest = { teamCount?: number; lives?: number; turnSeconds?: number }
